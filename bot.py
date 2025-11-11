@@ -241,19 +241,26 @@ async def verify(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
-@bot.tree.command(name="help")
+@bot.tree.command(name="deployhelper")
 @app_commands.default_permissions(administrator=True)
-async def help_command(interaction: discord.Interaction):
+async def deployhelper_command(interaction: discord.Interaction):
     try:
+        await interaction.response.defer(ephemeral=False)
         embed = discord.Embed(
             description="​",
             color=discord.Color.blue()
         )
         
         view = HelpOptionsView()
-        await interaction.response.send_message(embed=embed, view=view)
-    except:
-        pass
+        await interaction.followup.send(embed=embed, view=view)
+    except Exception as e:
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(f"Error: {str(e)}", ephemeral=True)
+            else:
+                await interaction.followup.send(f"Error: {str(e)}", ephemeral=True)
+        except:
+            pass
 
 
 def main():
