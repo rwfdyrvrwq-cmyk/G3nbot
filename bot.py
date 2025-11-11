@@ -241,7 +241,7 @@ async def verify(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
-@bot.tree.command(name="help")
+@bot.tree.command(name="deployhelper")
 @app_commands.default_permissions(administrator=True)
 async def help_command(interaction: discord.Interaction):
     try:
