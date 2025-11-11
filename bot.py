@@ -26,6 +26,10 @@ class FinishVerificationView(ui.View):
     @ui.button(label="Finish Verification", style=discord.ButtonStyle.success)
     async def finish_button(self, interaction: discord.Interaction, button: ui.Button):
         try:
+            if not interaction.user.guild_permissions.administrator:
+                await interaction.response.send_message("❌ Only administrators can complete verification.", ephemeral=True)
+                return
+            
             nickname_changed = False
             try:
                 await self.user.edit(nick=self.ign)
