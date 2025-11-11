@@ -233,7 +233,7 @@ async def verify(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
-@bot.tree.command(name="sync", description="Admin: Resync slash commands now")
+@bot.tree.command(name="sync")
 async def sync_commands(interaction: discord.Interaction):
     try:
         if not interaction.user.guild_permissions.administrator:
