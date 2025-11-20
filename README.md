@@ -1,6 +1,6 @@
 # AQW Discord Verification Bot
 
-An always-on AdventureQuest Worlds server assistant focused on secure player verification, detailed CharPage lookups, and in-server ticketing utilities. The bot orchestrates the `/verify` workflow with guild-specific admin channels, renders `/char` embeds powered by a bundled FlashVars scraper microservice, and rounds out daily operations with AQW wiki lookups, shop data, and TempleShrine/Ultra deployment helpers. It is designed for multi-guild deployments, uses slash commands exclusively, and ships with a lightweight TCP scraper process plus optional OCR utilities for cosmetics detection.
+An always-on AdventureQuest Worlds server assistant focused on secure player verification, detailed CharPage lookups, and in-server ticketing utilities. The bot orchestrates the `/verify` workflow with guild-specific admin channels, renders `/char` embeds powered by a bundled FlashVars scraper microservice, and rounds out daily operations with AQW wiki lookups, shop data, and TempleShrine/Ultra deployment helpers with advanced replacement tracking and leaderboard integration. It is designed for multi-guild deployments, uses slash commands exclusively, and ships with a lightweight TCP scraper process.
 
 ## Features
 
@@ -144,12 +144,14 @@ LOG_DIR="$HOME/verificationbot/logs" ./start_all.sh
 7. User's nickname changes to their IGN
 8. Verification channel is deleted
 
-### Deployment Helper (Admin Only)
+### Creating Deployment Tickets (Admin Only)
 
-1. Admin runs `/deployhelper`
-2. Empty embed appears with "Help?" button
-3. Members can click "Help?" to see deployment options
-4. Select an option from the dropdown menu
+1. Admin runs `/deployticket`
+2. Select ticket type from dropdown (UltraWeeklies, UltraDailies, TempleShrine)
+3. Select bosses and server
+4. Ticket is created with "I'll Help" button
+5. Helpers click to join, requester clicks "Finish Verification" when done
+6. If helpers left mid-run, system asks about replacements and distributes points fairly
 
 ## Deployment
 
