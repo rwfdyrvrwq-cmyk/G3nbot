@@ -1,6 +1,9 @@
 __pycache__/
 venv/
 .env
+.env.save
+.env.local
+.env.*.local
 
 # Runtime artifacts
 *.log
@@ -12,3 +15,6 @@ renders/
 *rendered*.gif
 charpage*.html
 charpage*_result.png
+
+# Helper points data
+helper_points.json

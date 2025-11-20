@@ -14,6 +14,9 @@ import json
 from pathlib import Path
 import logging
 from logging.handlers import RotatingFileHandler
+from discord.ext import tasks
+from datetime import time, timezone, datetime
+from typing import Literal
 
 load_dotenv(override=True)
 
@@ -49,6 +52,10 @@ MAX_TIMEOUT_MINUTES = 40320  # Discord maximum timeout (28 days)
 # Points file path
 POINTS_FILE = Path(__file__).parent / "helper_points.json"
 REQUESTER_FILE = Path(__file__).parent / "requester_stats.json"
+
+# Verification system file paths
+VERIFIED_USERS_FILE = Path(__file__).parent / "verified_users.json"
+VERIFICATION_CONFIG_FILE = Path(__file__).parent / "verification_config.json"
 
 # Boss points mapping
 BOSS_POINTS = {
@@ -208,6 +215,365 @@ def track_ticket_join(user_id):
     save_points(points_data)
 
 
+# ==================== VERIFICATION SYSTEM HELPERS ====================
+
+def load_verified_users():
+    """Load verified users from JSON file"""
+    try:
+        if VERIFIED_USERS_FILE.exists():
+            with open(VERIFIED_USERS_FILE, 'r') as f:
+                return json.load(f)
+        return {}
+    except Exception as e:
+        logger.error(f"Error loading verified users: {e}")
+        return {}
+
+def save_verified_users(data):
+    """Save verified users to JSON file"""
+    try:
+        with open(VERIFIED_USERS_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving verified users: {e}")
+
+def add_verified_user(user_id, ign, guild):
+    """Add a verified user to storage"""
+    users = load_verified_users()
+    user_id_str = str(user_id)
+
+    users[user_id_str] = {
+        "ign": ign,
+        "guild": guild,
+        "verified_at": datetime.now(timezone.utc).isoformat(),
+        "last_checked": datetime.now(timezone.utc).isoformat(),
+        "failed_checks": 0
+    }
+
+    save_verified_users(users)
+    logger.info(f"Added verified user: {user_id_str} (IGN: {ign}, Guild: {guild})")
+
+def remove_verified_user(user_id):
+    """Remove a verified user from storage"""
+    users = load_verified_users()
+    user_id_str = str(user_id)
+
+    if user_id_str in users:
+        del users[user_id_str]
+        save_verified_users(users)
+        logger.info(f"Removed verified user: {user_id_str}")
+        return True
+    return False
+
+def get_verified_user(user_id):
+    """Get verified user data"""
+    users = load_verified_users()
+    return users.get(str(user_id))
+
+def load_verification_config():
+    """Load verification config from JSON file"""
+    try:
+        if VERIFICATION_CONFIG_FILE.exists():
+            with open(VERIFICATION_CONFIG_FILE, 'r') as f:
+                return json.load(f)
+        # Default config
+        return {
+            "daily_check_enabled": True,
+            "last_check_time": None,
+            "total_checks_run": 0,
+            "users_removed_total": 0
+        }
+    except Exception as e:
+        logger.error(f"Error loading verification config: {e}")
+        return {
+            "daily_check_enabled": True,
+            "last_check_time": None,
+            "total_checks_run": 0,
+            "users_removed_total": 0
+        }
+
+def save_verification_config(data):
+    """Save verification config to JSON file"""
+    try:
+        with open(VERIFICATION_CONFIG_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving verification config: {e}")
+
+def is_daily_check_enabled():
+    """Check if daily verification checks are enabled"""
+    config = load_verification_config()
+    return config.get("daily_check_enabled", True)
+
+async def get_or_create_verification_logs_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
+    """Get or create the #verification-logs channel"""
+    try:
+        # Look for existing channel
+        channel = discord.utils.get(guild.text_channels, name="verification-logs")
+        if channel:
+            return channel
+
+        # Create the channel with admin/mod-only permissions
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        }
+
+        # Give admins and mods access
+        for role in guild.roles:
+            if role.permissions.administrator or role.permissions.manage_guild:
+                overwrites[role] = discord.PermissionOverwrite(read_messages=True)
+
+        channel = await guild.create_text_channel(
+            name="verification-logs",
+            overwrites=overwrites,
+            topic="Automated verification check logs - Admin/Mod only"
+        )
+
+        logger.info(f"Created verification-logs channel in {guild.name}")
+        return channel
+    except Exception as e:
+        logger.error(f"Error creating verification-logs channel: {e}")
+        return None
+
+# ==================== END VERIFICATION SYSTEM HELPERS ====================
+
+async def run_verification_check(guild: discord.Guild) -> dict:
+    """
+    Run verification check on all verified users
+    Returns dict with results: {checked, mismatches, errors, removed}
+    """
+    results = {
+        "checked": 0,
+        "mismatches": 0,
+        "errors": 0,
+        "removed": 0
+    }
+
+    verified_users = load_verified_users()
+    verified_role = discord.utils.get(guild.roles, name="Verified")
+
+    if not verified_role:
+        logger.warning("Verified role not found - skipping verification check")
+        return results
+
+    logs_channel = await get_or_create_verification_logs_channel(guild)
+
+    # Track users to remove (can't modify dict during iteration)
+    users_to_remove = []
+
+    for user_id_str, user_data in verified_users.items():
+        user_id = int(user_id_str)
+        member = guild.get_member(user_id)
+
+        # Skip if user left the server (keep data for when they return)
+        if not member:
+            continue
+
+        # Skip if user doesn't have Verified role anymore (manually removed)
+        if verified_role not in member.roles:
+            continue
+
+        results["checked"] += 1
+
+        stored_ign = user_data.get("ign", "").strip().lower()
+        stored_guild = user_data.get("guild")
+        if stored_guild:
+            stored_guild = stored_guild.strip().lower()
+
+        failed_checks = user_data.get("failed_checks", 0)
+
+        try:
+            # Fetch current character data from AQ.com
+            char_info = await get_character_info_async(stored_ign)
+
+            if not char_info or "error" in char_info:
+                # Network error - increment strike counter
+                failed_checks += 1
+                user_data["failed_checks"] = failed_checks
+                user_data["last_checked"] = datetime.now(timezone.utc).isoformat()
+                results["errors"] += 1
+
+                if failed_checks == 1:
+                    # Strike 1: Just log it
+                    if logs_channel:
+                        await logs_channel.send(
+                            f"⚠️ **Network Error (Strike 1/3)**\n"
+                            f"User: {member.mention} ({member.name})\n"
+                            f"IGN: `{user_data.get('ign')}`\n"
+                            f"Error: Could not fetch character data\n"
+                            f"Action: None - will retry tomorrow"
+                        )
+                    logger.warning(f"Network error checking {member.name} (Strike 1)")
+
+                elif failed_checks == 2:
+                    # Strike 2: Send warning DM
+                    if logs_channel:
+                        await logs_channel.send(
+                            f"⚠️ **Network Error (Strike 2/3)**\n"
+                            f"User: {member.mention} ({member.name})\n"
+                            f"IGN: `{user_data.get('ign')}`\n"
+                            f"Error: Could not fetch character data\n"
+                            f"Action: Warning DM sent to user"
+                        )
+                    try:
+                        await member.send(
+                            f"⚠️ **Verification Check Warning**\n\n"
+                            f"We've been unable to verify your character information for 2 consecutive days due to network errors.\n"
+                            f"IGN: `{user_data.get('ign')}`\n\n"
+                            f"If we cannot verify your information tomorrow, your 'Verified' role will be removed and you'll need to re-verify.\n\n"
+                            f"This is likely a temporary issue with the AQ.com character page. No action is needed from you."
+                        )
+                    except:
+                        pass
+                    logger.warning(f"Network error checking {member.name} (Strike 2) - Warning sent")
+
+                elif failed_checks >= 3:
+                    # Strike 3: Remove role and delete from storage
+                    try:
+                        await member.remove_roles(verified_role)
+                        users_to_remove.append(user_id_str)
+                        results["removed"] += 1
+
+                        if logs_channel:
+                            await logs_channel.send(
+                                f"❌ **Verification Removed (Strike 3/3)**\n"
+                                f"User: {member.mention} ({member.name})\n"
+                                f"IGN: `{user_data.get('ign')}`\n"
+                                f"Reason: 3 consecutive network errors\n"
+                                f"Action: Role removed, user must re-verify"
+                            )
+
+                        try:
+                            await member.send(
+                                f"❌ **Verification Removed**\n\n"
+                                f"Your 'Verified' role has been removed because we were unable to verify your character information for 3 consecutive days.\n"
+                                f"IGN: `{user_data.get('ign')}`\n\n"
+                                f"This was likely due to temporary network issues. You can re-verify using the verification embed in the server."
+                            )
+                        except:
+                            pass
+                        logger.info(f"Removed {member.name} after 3 network errors")
+                    except Exception as e:
+                        logger.error(f"Error removing role from {member.name}: {e}")
+
+                continue  # Skip to next user
+
+            # Successfully fetched data - check for mismatches
+            current_ign = char_info.get("name", "").strip().lower()
+            current_guild = char_info.get("guild")
+            if current_guild:
+                current_guild = current_guild.strip().lower()
+
+            # Reset failed checks on successful fetch
+            user_data["failed_checks"] = 0
+            user_data["last_checked"] = datetime.now(timezone.utc).isoformat()
+
+            # Check if IGN or Guild changed
+            ign_matches = current_ign == stored_ign
+            guild_matches = (current_guild == stored_guild) if stored_guild else True
+
+            if not ign_matches or not guild_matches:
+                # Mismatch found - remove role immediately
+                results["mismatches"] += 1
+                results["removed"] += 1
+
+                mismatch_details = []
+                if not ign_matches:
+                    mismatch_details.append(f"IGN changed: `{user_data.get('ign')}` → `{char_info.get('name')}`")
+                if not guild_matches:
+                    mismatch_details.append(f"Guild changed: `{user_data.get('guild')}` → `{char_info.get('guild')}`")
+
+                try:
+                    await member.remove_roles(verified_role)
+                    users_to_remove.append(user_id_str)
+
+                    if logs_channel:
+                        await logs_channel.send(
+                            f"❌ **Verification Mismatch Detected**\n"
+                            f"User: {member.mention} ({member.name})\n"
+                            + "\n".join(mismatch_details) +
+                            f"\nAction: Role removed, user must re-verify"
+                        )
+
+                    try:
+                        await member.send(
+                            f"❌ **Verification Status Changed**\n\n"
+                            f"Your 'Verified' role has been removed because your character information has changed:\n"
+                            + "\n".join(mismatch_details) +
+                            f"\n\nIf you'd like to verify with your new information, please use the verification embed in the server."
+                        )
+                    except:
+                        pass
+                    logger.info(f"Removed {member.name} due to data mismatch")
+                except Exception as e:
+                    logger.error(f"Error removing role from {member.name}: {e}")
+
+        except Exception as e:
+            logger.error(f"Error checking user {user_id_str}: {e}")
+            results["errors"] += 1
+
+    # Remove users from storage
+    for user_id_str in users_to_remove:
+        remove_verified_user(user_id_str)
+
+    # Update config
+    config = load_verification_config()
+    config["last_check_time"] = datetime.now(timezone.utc).isoformat()
+    config["total_checks_run"] = config.get("total_checks_run", 0) + 1
+    config["users_removed_total"] = config.get("users_removed_total", 0) + results["removed"]
+    save_verification_config(config)
+
+    # Save updated user data
+    save_verified_users(verified_users)
+
+    return results
+
+@tasks.loop(time=time(hour=0, minute=0, tzinfo=timezone.utc))
+async def daily_verification_check():
+    """Daily task that runs at 12:00 AM UTC to check all verified users"""
+    try:
+        if not is_daily_check_enabled():
+            logger.info("Daily verification check is disabled - skipping")
+            return
+
+        logger.info("Starting daily verification check...")
+
+        # Run checks for all guilds the bot is in
+        for guild in bot.guilds:
+            try:
+                results = await run_verification_check(guild)
+                logger.info(
+                    f"Verification check complete for {guild.name}: "
+                    f"Checked {results['checked']}, "
+                    f"Mismatches {results['mismatches']}, "
+                    f"Errors {results['errors']}, "
+                    f"Removed {results['removed']}"
+                )
+
+                # Send summary to logs channel
+                logs_channel = await get_or_create_verification_logs_channel(guild)
+                if logs_channel and results['checked'] > 0:
+                    await logs_channel.send(
+                        f"✅ **Daily Verification Check Complete**\n"
+                        f"Users Checked: {results['checked']}\n"
+                        f"Mismatches Found: {results['mismatches']}\n"
+                        f"Network Errors: {results['errors']}\n"
+                        f"Roles Removed: {results['removed']}"
+                    )
+            except Exception as e:
+                logger.error(f"Error running verification check for {guild.name}: {e}")
+
+        logger.info("Daily verification check completed for all guilds")
+    except Exception as e:
+        logger.error(f"Error in daily verification check task: {e}")
+
+@daily_verification_check.before_loop
+async def before_daily_verification_check():
+    """Wait until the bot is ready before starting the task"""
+    await bot.wait_until_ready()
+    logger.info("Daily verification check task initialized")
+
+
 def get_user_stats(user_id):
     """Get user statistics"""
     points_data = load_points()
@@ -294,11 +660,12 @@ http_session = None
 
 
 class FinishVerificationView(ui.View):
-    def __init__(self, channel: discord.TextChannel, user: discord.Member, ign: str, has_mismatch: bool = False):
+    def __init__(self, channel: discord.TextChannel, user: discord.Member, ign: str, guild: str = "", has_mismatch: bool = False):
         super().__init__()
         self.channel = channel
         self.user = user
         self.ign = ign
+        self.guild = guild
 
         # Always add reject button for admin discretion
         self.add_item(RejectButton(channel, user, ign))
@@ -309,8 +676,21 @@ class FinishVerificationView(ui.View):
             if not interaction.user.guild_permissions.administrator:
                 await interaction.response.send_message("❌ Only administrators can complete verification.", ephemeral=True)
                 return
-            
+
+            # Check if "Verified" role exists
+            verified_role = discord.utils.get(interaction.guild.roles, name="Verified")
+            if not verified_role:
+                await interaction.response.send_message(
+                    "⚠️ **'Verified' role not found!**\n\n"
+                    "Please create a 'Verified' role in the server for the verification system to work properly.\n"
+                    "I cannot complete this verification without it.",
+                    ephemeral=True
+                )
+                return
+
             nickname_changed = False
+            role_assigned = False
+
             try:
                 await self.user.edit(nick=self.ign)
                 nickname_changed = True
@@ -327,17 +707,40 @@ class FinishVerificationView(ui.View):
                 await asyncio.sleep(5)
             except:
                 pass
-            
-            if nickname_changed:
-                await interaction.response.send_message(f"✅ Nickname changed to `{self.ign}` and verification complete!", ephemeral=True)
-                
+
+            # Assign Verified role
+            try:
+                await self.user.add_roles(verified_role)
+                role_assigned = True
+            except Exception as role_error:
+                logger.error(f"Failed to assign Verified role: {role_error}")
+
+            if nickname_changed or role_assigned:
+                # Save user to verified_users.json
+                add_verified_user(self.user.id, self.ign, self.guild if self.guild else None)
+
+                success_msg = f"✅ Verification complete!\n"
+                if nickname_changed:
+                    success_msg += f"• Nickname changed to `{self.ign}`\n"
+                if role_assigned:
+                    success_msg += f"• Verified role assigned\n"
+                success_msg += f"• User data saved for daily verification checks"
+
+                await interaction.response.send_message(success_msg, ephemeral=True)
+
                 try:
-                    await self.user.send(f"✅ **Verification Approved!**\n\nYour verification has been approved by an administrator. Your nickname has been updated to `{self.ign}`.")
+                    await self.user.send(
+                        f"✅ **Verification Approved!**\n\n"
+                        f"Your verification has been approved by an administrator.\n"
+                        f"• Your nickname has been updated to `{self.ign}`\n"
+                        f"• You now have the 'Verified' role\n\n"
+                        f"Your verification status will be checked daily to ensure your character information remains accurate."
+                    )
                 except:
                     pass
-                
+
                 await asyncio.sleep(1)
-            
+
             await self.channel.delete()
         except Exception as e:
             try:
@@ -426,7 +829,16 @@ class VerificationModal(ui.Modal, title="Character Verification"):
                 embed.add_field(name="Status", value="⚠️ **Verification Pending** - Mismatches detected. Admin review required.", inline=False)
             
             embed.add_field(name="User", value=f"{interaction.user.mention} ({interaction.user.name})", inline=False)
-            
+
+            # Check if this is a re-verification
+            existing_data = get_verified_user(interaction.user.id)
+            if existing_data:
+                embed.add_field(
+                    name="ℹ️ Re-verification",
+                    value=f"User was previously verified with:\nIGN: `{existing_data.get('ign')}`\nGuild: `{existing_data.get('guild') or '(none)'}`",
+                    inline=False
+                )
+
             try:
                 guild = interaction.guild
                 if guild:
@@ -456,7 +868,7 @@ class VerificationModal(ui.Modal, title="Character Verification"):
                         overwrites=admin_overwrites,
                         topic=f"Verification record for {interaction.user.name} (IGN: {user_ign})"
                     )
-                    finish_view = FinishVerificationView(channel, interaction.user, user_ign, has_mismatch)
+                    finish_view = FinishVerificationView(channel, interaction.user, user_ign, user_guild, has_mismatch)
                     await channel.send(embed=embed, view=finish_view)
 
                     # Send charpage link outside the embed
@@ -1029,13 +1441,22 @@ async def on_ready():
             logger.error(f"Failed to sync commands: {e}", exc_info=True)
             import traceback
             traceback.print_exc()
+
+        # Start the daily verification check task
+        if not daily_verification_check.is_running():
+            daily_verification_check.start()
+            logger.info("✓ Daily verification check task started")
+
     except Exception as e:
         logger.error(f"Error in on_ready: {e}", exc_info=True)
 
 
-@bot.tree.command(name="verify")
+@bot.tree.command(name="deployverification")
 @app_commands.guild_only()
-async def verify(interaction: discord.Interaction):
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(channel="The channel to send the verification embed to")
+async def deployverification(interaction: discord.Interaction, channel: discord.TextChannel):
+    """Deploy the verification embed to a specific channel (Admin only)"""
     embed = discord.Embed(
         title="🔐 Account Verification",
         description="Verify AQW account",
@@ -1044,7 +1465,84 @@ async def verify(interaction: discord.Interaction):
     embed.add_field(name="How to verify", value="1. Click the **Start Verification** button below\n2. Enter your IGN (In-Game Name)\n3. Enter your Guild (or leave blank if you have none)", inline=False)
 
     view = VerifyButton()
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    # Send to the specified channel
+    try:
+        await channel.send(embed=embed, view=view)
+
+        # Check if "Verified" role exists and warn admin if not
+        verified_role = discord.utils.get(interaction.guild.roles, name="Verified")
+        if not verified_role:
+            await interaction.response.send_message(
+                f"✅ Verification embed deployed to {channel.mention}\n\n"
+                f"⚠️ **Warning:** 'Verified' role not found in this server.\n"
+                f"Please create a 'Verified' role for the verification system to work properly.",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(f"✅ Verification embed deployed to {channel.mention}", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Error: {str(e)}", ephemeral=True)
+
+
+@bot.tree.command(name="verificationcheck")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(action="Action to perform: enable, disable, status, or runnow")
+async def verificationcheck(interaction: discord.Interaction, action: Literal["enable", "disable", "status", "runnow"]):
+    """Manage daily verification checks (Admin only)"""
+    config = load_verification_config()
+
+    if action == "enable":
+        config["daily_check_enabled"] = True
+        save_verification_config(config)
+        await interaction.response.send_message("✅ Daily verification checks have been **enabled**.", ephemeral=True)
+
+    elif action == "disable":
+        config["daily_check_enabled"] = False
+        save_verification_config(config)
+        await interaction.response.send_message("⚠️ Daily verification checks have been **disabled**.", ephemeral=True)
+
+    elif action == "status":
+        status = "✅ Enabled" if config.get("daily_check_enabled", True) else "❌ Disabled"
+        last_check = config.get("last_check_time", "Never")
+        total_checks = config.get("total_checks_run", 0)
+        users_removed = config.get("users_removed_total", 0)
+
+        verified_users = load_verified_users()
+        verified_count = len(verified_users)
+
+        embed = discord.Embed(
+            title="📊 Verification Check Status",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="Daily Checks", value=status, inline=False)
+        embed.add_field(name="Last Check", value=last_check, inline=False)
+        embed.add_field(name="Total Checks Run", value=str(total_checks), inline=True)
+        embed.add_field(name="Users Removed", value=str(users_removed), inline=True)
+        embed.add_field(name="Currently Verified", value=f"{verified_count} users", inline=True)
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    elif action == "runnow":
+        await interaction.response.defer(ephemeral=True)
+        try:
+            # Import the run_verification_check function that we'll create next
+            results = await run_verification_check(interaction.guild)
+
+            embed = discord.Embed(
+                title="✅ Verification Check Complete",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Users Checked", value=str(results["checked"]), inline=True)
+            embed.add_field(name="Mismatches Found", value=str(results["mismatches"]), inline=True)
+            embed.add_field(name="Network Errors", value=str(results["errors"]), inline=True)
+            embed.add_field(name="Roles Removed", value=str(results["removed"]), inline=True)
+
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error running verification check: {str(e)}", ephemeral=True)
+            logger.error(f"Error in manual verification check: {e}")
 
 
 @bot.tree.command(name="serverinfo")
@@ -4085,7 +4583,7 @@ class TempleShrineDailiesModal(ui.Modal, title="TempleShrine Dailies Request"):
             )
             embed.add_field(name="IGN", value=user_ign, inline=False)
             embed.add_field(name="Server", value=user_server, inline=False)
-            embed.add_field(name="Room", value=f"/join templesiege-{user_room}", inline=False)
+            embed.add_field(name="Room", value=f"/join templeshrine-{user_room}", inline=False)
 
             # Add selected sides
             if len(self.selected_sides) == 3:
@@ -4209,7 +4707,7 @@ class TempleShrineSpammingModal(ui.Modal, title="TempleShrine Spamming Request")
             )
             embed.add_field(name="IGN", value=user_ign, inline=False)
             embed.add_field(name="Server", value=user_server, inline=False)
-            embed.add_field(name="Room", value=f"/join templesiege-{user_room}", inline=False)
+            embed.add_field(name="Room", value=f"/join templeshrine-{user_room}", inline=False)
 
             # Add selected sides
             if len(self.selected_sides) == 3:
@@ -4259,7 +4757,7 @@ class TempleShrineHelperView(ui.View):
     def __init__(self, requester_id, selected_sides, boss_key, mode="dailies"):
         super().__init__(timeout=None)
         self.helpers = []
-        self.max_helpers = 6
+        self.max_helpers = 3
         self.requester_id = requester_id
         self.selected_sides = selected_sides
         self.boss_key = boss_key
@@ -4273,7 +4771,7 @@ class TempleShrineHelperView(ui.View):
                 item.label = f"I'll Help (0/{self.max_helpers})"
                 break
 
-    @ui.button(label="I'll Help (0/6)", style=discord.ButtonStyle.success, custom_id="temple_helper_button")
+    @ui.button(label="I'll Help (0/3)", style=discord.ButtonStyle.success, custom_id="temple_helper_button")
     async def help_button(self, interaction: discord.Interaction, button: ui.Button):
         try:
             user_id = interaction.user.id
@@ -4414,11 +4912,33 @@ class TempleShrineHelperView(ui.View):
                 return
 
             if self.mode == "spamming":
-                # For spamming mode, ask for actual kill count per side
+                # For spamming mode - check if there are replacements
+                if self.replacements:
+                    # Ask for kill counts for each person who left
+                    view = ReplacementKillCountView(self, interaction.message, button, self.replacements, self.selected_sides, interaction)
+                    await interaction.response.send_message(
+                        f"There were {len(self.replacements)} helper(s) who left. Please specify kill counts for each person who left.",
+                        view=view,
+                        ephemeral=True
+                    )
+                    return
+
+                # No replacements - ask for total kill counts
                 modal = CompleteSpammingModal(self, interaction.message, button, self.selected_sides)
                 await interaction.response.send_modal(modal)
             else:
-                # For dailies mode
+                # For dailies mode - check if there are replacements
+                if self.replacements:
+                    # Ask which sides each person who left helped with
+                    view = ReplacementSidesView(self, interaction.message, button, self.replacements, interaction)
+                    await interaction.response.send_message(
+                        f"There were {len(self.replacements)} helper(s) who left. Please specify which sides each person who left helped with (select none if they didn't help any).",
+                        view=view,
+                        ephemeral=True
+                    )
+                    return
+
+                # No replacements - simple completion
                 if isinstance(self.boss_key, list):
                     # Partial sides
                     total_points = sum(BOSS_POINTS.get(key, 0) for key in self.boss_key)
@@ -4576,7 +5096,8 @@ class RemoveHelperSpammingModal(ui.Modal, title="Remove Helper - Spamming"):
                 'left_mention': helper_to_remove[1],
                 'replacement_id': None,
                 'replacement_mention': None,
-                'sides_covered': side_kills  # Track kill counts per side for spamming mode
+                'sides_covered': side_kills,  # Track kill counts per side for spamming mode
+                'kills_by_left': side_kills   # Also store as kills_by_left for completion compatibility
             })
 
             # Update the button label to show count
@@ -4828,6 +5349,668 @@ class CompleteSpammingModal(ui.Modal, title="Complete Spamming Ticket"):
                 pass
 
 
+class ReplacementSidesView(ui.View):
+    """View to ask which sides each replacement covered for TempleShrine Dailies"""
+
+    def __init__(self, helper_view, message, button, replacements_with_ids, interaction=None):
+        super().__init__(timeout=120)
+        self.helper_view = helper_view
+        self.message = message
+        self.button = button
+        self.replacements_with_ids = replacements_with_ids
+        self.current_index = 0
+        self.initial_interaction = interaction
+
+        # Get available sides from helper_view
+        if isinstance(helper_view.boss_key, list):
+            self.available_sides = helper_view.boss_key
+        else:
+            # Convert TempleShrine-All to individual sides
+            if helper_view.boss_key == "TempleShrine-All":
+                self.available_sides = ["TempleShrine-Left", "TempleShrine-Right", "TempleShrine-Middle"]
+            else:
+                self.available_sides = [helper_view.boss_key]
+
+        if len(self.replacements_with_ids) > 0:
+            self._add_current_replacement_select()
+
+    def _add_current_replacement_select(self, interaction=None):
+        """Add dropdown for current helper who left"""
+        self.clear_items()
+
+        replacement = self.replacements_with_ids[self.current_index]
+        left_id = replacement['left_id']
+        active_interaction = interaction or self.initial_interaction
+
+        if active_interaction and active_interaction.guild:
+            left_name = format_helper_display_name(active_interaction.client, active_interaction.guild, left_id)
+        else:
+            left_name = replacement['left_mention']
+
+        # Create dropdown with all available sides
+        options = []
+        for side_key in self.available_sides:
+            side_display = side_key.replace("TempleShrine-", "") + " Side"
+            points = BOSS_POINTS.get(side_key, 0)
+            options.append(discord.SelectOption(
+                label=side_display,
+                value=side_key,
+                description=f"{points} points"
+            ))
+
+        select = ui.Select(
+            placeholder=f"Which sides did {left_name} help with?",
+            options=options,
+            min_values=0,
+            max_values=len(options)
+        )
+        select.callback = self._sides_selected
+        self.add_item(select)
+
+    async def _sides_selected(self, interaction: discord.Interaction):
+        """Handle side selection for person who left"""
+        selected_sides = list(interaction.data['values'])
+        self.replacements_with_ids[self.current_index]['sides_covered_by_left'] = selected_sides
+
+        # Now ask who replaced them
+        self._add_replacement_helper_select(interaction)
+        await interaction.response.edit_message(
+            content=f"Helper who left {self.current_index + 1} of {len(self.replacements_with_ids)}: Who replaced them?",
+            view=self
+        )
+
+    def _add_replacement_helper_select(self, interaction):
+        """Add dropdown to select who replaced this person"""
+        self.clear_items()
+
+        replacement = self.replacements_with_ids[self.current_index]
+        left_id = replacement['left_id']
+        left_name = format_helper_display_name(interaction.client, interaction.guild, left_id)
+
+        # Collect helpers who have already been assigned as replacements
+        already_assigned = set()
+        for i in range(self.current_index):
+            prev_replacement = self.replacements_with_ids[i]
+            if prev_replacement.get('replacement_id') is not None:
+                already_assigned.add(prev_replacement['replacement_id'])
+
+        # Create dropdown with current helpers
+        options = []
+        for helper_id, helper_mention in self.helper_view.helpers:
+            if helper_id in already_assigned:
+                continue
+
+            helper_display = format_helper_display_name(interaction.client, interaction.guild, helper_id)
+            options.append(discord.SelectOption(
+                label=helper_display,
+                value=str(helper_id),
+                description=f"Replaced {left_name}"
+            ))
+
+        options.append(discord.SelectOption(
+            label="No one replaced them",
+            value="none",
+            description="Slot never filled, filled by non-member, or public player"
+        ))
+
+        select = ui.Select(
+            placeholder=f"Who replaced {left_name}?",
+            options=options,
+            min_values=1,
+            max_values=1
+        )
+        select.callback = self._replacement_helper_selected
+        self.add_item(select)
+
+    async def _replacement_helper_selected(self, interaction: discord.Interaction):
+        """Handle selection of who replaced the person who left"""
+        selected_value = interaction.data['values'][0]
+
+        if selected_value == "none":
+            self.replacements_with_ids[self.current_index]['replacement_id'] = None
+            self.replacements_with_ids[self.current_index]['replacement_mention'] = "No one"
+        else:
+            selected_id = int(selected_value)
+            for helper_id, helper_mention in self.helper_view.helpers:
+                if helper_id == selected_id:
+                    self.replacements_with_ids[self.current_index]['replacement_id'] = helper_id
+                    self.replacements_with_ids[self.current_index]['replacement_mention'] = helper_mention
+                    break
+
+        # Move to next person who left
+        self.current_index += 1
+
+        if self.current_index < len(self.replacements_with_ids):
+            self._add_current_replacement_select()
+            await interaction.response.edit_message(
+                content=f"Helper who left {self.current_index + 1} of {len(self.replacements_with_ids)}",
+                view=self
+            )
+        else:
+            await interaction.response.edit_message(
+                content="Processing ticket completion...",
+                view=None
+            )
+            await self._complete_ticket_with_replacements(interaction)
+
+    async def _complete_ticket_with_replacements(self, interaction: discord.Interaction):
+        """Complete ticket with replacement tracking - Award points based on who covered what"""
+        all_sides = set(self.available_sides)
+        people_who_left = {}
+        replacement_rewards = {}
+        helpers_with_replacements = set()
+
+        # Step 1: Process each person who left
+        for replacement in self.replacements_with_ids:
+            left_id = replacement['left_id']
+            left_mention = replacement['left_mention']
+            sides_covered_by_left = set(replacement.get('sides_covered_by_left', []))
+            replacement_id = replacement.get('replacement_id')
+
+            # Award points to person who left
+            left_points = sum(BOSS_POINTS.get(side, 0) for side in sides_covered_by_left)
+
+            if left_points > 0 or len(sides_covered_by_left) > 0:
+                new_total = add_points(left_id, left_points, list(sides_covered_by_left))
+                people_who_left[left_id] = {
+                    'mention': left_mention,
+                    'sides_covered': list(sides_covered_by_left),
+                    'points': left_points,
+                    'new_total': new_total
+                }
+
+            # Award remaining sides to the REPLACEMENT
+            if replacement_id is not None:
+                helpers_with_replacements.add(replacement_id)
+                remaining_sides_for_this_slot = all_sides - sides_covered_by_left
+                remaining_points_for_this_slot = sum(BOSS_POINTS.get(side, 0) for side in remaining_sides_for_this_slot)
+
+                if replacement_id not in replacement_rewards:
+                    replacement_rewards[replacement_id] = {'points': 0, 'sides': set()}
+
+                replacement_rewards[replacement_id]['points'] += remaining_points_for_this_slot
+                replacement_rewards[replacement_id]['sides'].update(remaining_sides_for_this_slot)
+
+        # Step 2: Award points to helpers
+        helper_rewards = []
+        for helper_id, helper_mention in self.helper_view.helpers:
+            if helper_id in replacement_rewards:
+                reward_info = replacement_rewards[helper_id]
+                points = reward_info['points']
+                sides = list(reward_info['sides'])
+                new_total = add_points(helper_id, points, sides)
+                helper_rewards.append(f"{helper_mention}: +{points} points (Total: {new_total})")
+            else:
+                # This helper was NOT a replacement - award ALL sides
+                total_points = sum(BOSS_POINTS.get(side, 0) for side in all_sides)
+                new_total = add_points(helper_id, total_points, list(all_sides))
+                helper_rewards.append(f"{helper_mention}: +{total_points} points (Total: {new_total})")
+
+        # Add people who left to helper rewards
+        for left_id, left_info in people_who_left.items():
+            helper_rewards.append(f"{left_info['mention']}: +{left_info['points']} points (Total: {left_info['new_total']}) [Left mid-run]")
+
+        # Build detailed breakdown
+        sides_points_breakdown = []
+        for side in self.available_sides:
+            side_display = side.replace("TempleShrine-", "") + " Side"
+            points = BOSS_POINTS.get(side, 0)
+            sides_points_breakdown.append(f"**{side_display}:** {points} points")
+
+        completion_summary = "\n".join(sides_points_breakdown)
+
+        # Add info about people who left and their replacements
+        if self.replacements_with_ids:
+            completion_summary += "\n\n**Replacements:**"
+            for repl in self.replacements_with_ids:
+                left_id = repl['left_id']
+                left_name = repl['left_mention']
+                repl_name = repl['replacement_mention']
+                sides_covered_by_left = repl.get('sides_covered_by_left', [])
+
+                if sides_covered_by_left:
+                    sides_str = ", ".join([s.replace("TempleShrine-", "") + " Side" for s in sides_covered_by_left])
+                    left_points = sum(BOSS_POINTS.get(s, 0) for s in sides_covered_by_left)
+                    completion_summary += f"\n• {repl_name} replaced {left_name}"
+                    completion_summary += f"\n  ↳ {left_name} helped with: {sides_str} ({left_points}pts)"
+                else:
+                    completion_summary += f"\n• {repl_name} replaced {left_name}"
+                    completion_summary += f"\n  ↳ {left_name} left before helping (0pts)"
+
+        # Mark ticket as completed
+        self.helper_view.ticket_completed = True
+        self.button.disabled = True
+        await self.message.edit(view=self.helper_view)
+
+        # Create completion embed
+        completion_embed = discord.Embed(
+            title="✅ TempleShrine Dailies Ticket Completed!",
+            color=discord.Color.green(),
+            timestamp=discord.utils.utcnow()
+        )
+
+        completion_embed.add_field(name="Requester", value=f"<@{self.helper_view.requester_id}>", inline=False)
+        completion_embed.add_field(name="Completion Summary", value=completion_summary, inline=False)
+        completion_embed.add_field(name="Helper Rewards", value="\n".join(helper_rewards), inline=False)
+
+        guild = interaction.guild
+        ticket_logs_channel = discord.utils.get(guild.text_channels, name="ticket-logs")
+
+        if ticket_logs_channel:
+            await ticket_logs_channel.send(embed=completion_embed)
+            await interaction.followup.send("Ticket completed! Summary sent to ticket-logs. Channel will be deleted in 10 seconds.", ephemeral=True)
+            await asyncio.sleep(10)
+            try:
+                await interaction.channel.delete(reason="TempleShrine Dailies ticket completed")
+            except Exception as e:
+                logger.error(f"Error deleting channel: {e}")
+        else:
+            await interaction.followup.send(embed=completion_embed, ephemeral=False)
+
+
+class ReplacementKillCountView(ui.View):
+    """View to ask for kill counts for each person who left in TempleShrine Spamming"""
+
+    def __init__(self, helper_view, message, button, replacements_with_ids, selected_sides, interaction=None):
+        super().__init__(timeout=120)
+        self.helper_view = helper_view
+        self.message = message
+        self.button = button
+        self.replacements_with_ids = replacements_with_ids
+        self.selected_sides = selected_sides
+        self.current_index = 0
+        self.initial_interaction = interaction
+
+        if len(self.replacements_with_ids) > 0:
+            self._add_start_button()
+
+    def _add_start_button(self):
+        """Add button to start entering kill counts for person who left, or skip if already entered"""
+        self.clear_items()
+
+        replacement = self.replacements_with_ids[self.current_index]
+        left_id = replacement['left_id']
+
+        if self.initial_interaction and self.initial_interaction.guild:
+            left_name = format_helper_display_name(self.initial_interaction.client, self.initial_interaction.guild, left_id)
+        else:
+            left_name = replacement['left_mention']
+
+        # Check if kill counts already exist (entered during removal)
+        if 'kills_by_left' in replacement and replacement['kills_by_left']:
+            # Skip kill count entry, go straight to asking who replaced them
+            button = ui.Button(
+                label=f"Select replacement for {left_name}",
+                style=discord.ButtonStyle.success
+            )
+            button.callback = self._skip_to_replacement_select
+        else:
+            # Need to enter kill counts
+            button = ui.Button(
+                label=f"Enter kills for {left_name}",
+                style=discord.ButtonStyle.primary
+            )
+            button.callback = self._show_kill_count_modal
+
+        self.add_item(button)
+
+    async def _skip_to_replacement_select(self, interaction: discord.Interaction):
+        """Skip kill count entry and go straight to replacement selection"""
+        await self._show_replacement_helper_select(interaction)
+        await interaction.response.edit_message(
+            content=f"Helper who left {self.current_index + 1} of {len(self.replacements_with_ids)}: Who replaced them?",
+            view=self
+        )
+
+    async def _show_kill_count_modal(self, interaction: discord.Interaction):
+        """Show modal to enter kill counts for person who left"""
+        replacement = self.replacements_with_ids[self.current_index]
+        left_id = replacement['left_id']
+        left_name = format_helper_display_name(interaction.client, interaction.guild, left_id)
+
+        modal = ReplacementKillCountModal(self, replacement, left_name, self.selected_sides, interaction)
+        await interaction.response.send_modal(modal)
+
+    async def _show_replacement_helper_select(self, interaction):
+        """Add dropdown to select who replaced this person"""
+        self.clear_items()
+
+        replacement = self.replacements_with_ids[self.current_index]
+        left_id = replacement['left_id']
+        left_name = format_helper_display_name(interaction.client, interaction.guild, left_id)
+
+        # Collect helpers who have already been assigned as replacements
+        already_assigned = set()
+        for i in range(self.current_index):
+            prev_replacement = self.replacements_with_ids[i]
+            if prev_replacement.get('replacement_id') is not None:
+                already_assigned.add(prev_replacement['replacement_id'])
+
+        # Create dropdown with current helpers
+        options = []
+        for helper_id, helper_mention in self.helper_view.helpers:
+            if helper_id in already_assigned:
+                continue
+
+            helper_display = format_helper_display_name(interaction.client, interaction.guild, helper_id)
+            options.append(discord.SelectOption(
+                label=helper_display,
+                value=str(helper_id),
+                description=f"Replaced {left_name}"
+            ))
+
+        options.append(discord.SelectOption(
+            label="No one replaced them",
+            value="none",
+            description="Slot never filled, filled by non-member, or public player"
+        ))
+
+        select = ui.Select(
+            placeholder=f"Who replaced {left_name}?",
+            options=options,
+            min_values=1,
+            max_values=1
+        )
+        select.callback = self._replacement_helper_selected
+        self.add_item(select)
+
+    async def _replacement_helper_selected(self, interaction: discord.Interaction):
+        """Handle selection of who replaced the person who left"""
+        selected_value = interaction.data['values'][0]
+
+        if selected_value == "none":
+            self.replacements_with_ids[self.current_index]['replacement_id'] = None
+            self.replacements_with_ids[self.current_index]['replacement_mention'] = "No one"
+        else:
+            selected_id = int(selected_value)
+            for helper_id, helper_mention in self.helper_view.helpers:
+                if helper_id == selected_id:
+                    self.replacements_with_ids[self.current_index]['replacement_id'] = helper_id
+                    self.replacements_with_ids[self.current_index]['replacement_mention'] = helper_mention
+                    break
+
+        # Move to next person who left
+        self.current_index += 1
+
+        if self.current_index < len(self.replacements_with_ids):
+            self._add_start_button()
+            await interaction.response.edit_message(
+                content=f"Helper who left {self.current_index + 1} of {len(self.replacements_with_ids)}",
+                view=self
+            )
+        else:
+            # All people who left processed, now ask for final total kill counts
+            await interaction.response.edit_message(
+                content="Now enter the TOTAL kill counts for the entire run:",
+                view=None
+            )
+            # Show modal for total kill counts
+            modal = CompleteTotalKillCountModal(self, self.selected_sides)
+            await interaction.followup.send("Enter total kill counts:", ephemeral=True)
+            # We need to trigger this differently - let me use a button instead
+            view = ui.View(timeout=60)
+            button = ui.Button(label="Enter Total Kill Counts", style=discord.ButtonStyle.success)
+
+            async def show_total_modal(btn_interaction):
+                total_modal = CompleteTotalKillCountModal(self, self.selected_sides)
+                await btn_interaction.response.send_modal(total_modal)
+
+            button.callback = show_total_modal
+            view.add_item(button)
+            await interaction.followup.send("Click to enter total kill counts:", view=view, ephemeral=True)
+
+
+class ReplacementKillCountModal(ui.Modal, title="Kill Counts"):
+    """Modal to input kill counts for person who left"""
+
+    def __init__(self, parent_view, replacement, left_name, available_sides, interaction):
+        super().__init__()
+        self.title = f"Kills for {left_name}"
+        self.parent_view = parent_view
+        self.replacement = replacement
+        self.left_name = left_name
+        self.available_sides = available_sides
+        self.interaction = interaction
+
+        # Create text inputs for each side
+        for side in available_sides:
+            side_name = side.replace(" Side", "")
+            text_input = ui.TextInput(
+                label=f"{side_name} Side Kills",
+                placeholder=f"How many {side_name} kills? (0 if none)",
+                required=True,
+                max_length=4,
+                default="0"
+            )
+            self.add_item(text_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            # Parse kill counts
+            side_kills = {}
+            for i, side in enumerate(self.available_sides):
+                side_name = side.replace(" Side", "")
+                kill_value = self.children[i].value.strip()
+
+                if not kill_value.isdigit():
+                    await interaction.response.send_message(f"{side_name} kill count must be a number!", ephemeral=True)
+                    return
+
+                kills = int(kill_value)
+                side_kills[side_name] = kills
+
+            # Store kill counts for this person who left
+            self.replacement['kills_by_left'] = side_kills
+
+            # Now show dropdown to select who replaced them
+            await self.parent_view._show_replacement_helper_select(self.interaction)
+            await interaction.response.edit_message(
+                content=f"Helper who left {self.parent_view.current_index + 1} of {len(self.parent_view.replacements_with_ids)}: Who replaced them?",
+                view=self.parent_view
+            )
+
+        except Exception as e:
+            try:
+                await interaction.response.send_message(f"Error: {str(e)}", ephemeral=True)
+            except:
+                pass
+
+
+class CompleteTotalKillCountModal(ui.Modal, title="Total Kill Counts"):
+    """Modal to input TOTAL kill counts for the entire spamming run"""
+
+    def __init__(self, parent_view, available_sides):
+        super().__init__()
+        self.parent_view = parent_view
+        self.available_sides = available_sides
+
+        # Create text inputs for each side
+        for side in available_sides:
+            side_name = side.replace(" Side", "")
+            text_input = ui.TextInput(
+                label=f"{side_name} Side Total Kills",
+                placeholder=f"Total {side_name} kills completed?",
+                required=True,
+                max_length=4,
+                default="0"
+            )
+            self.add_item(text_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            # Parse total kill counts
+            total_side_kills = {}
+            for i, side in enumerate(self.available_sides):
+                side_name = side.replace(" Side", "")
+                kill_value = self.children[i].value.strip()
+
+                if not kill_value.isdigit():
+                    await interaction.response.send_message(f"{side_name} kill count must be a number!", ephemeral=True)
+                    return
+
+                kills = int(kill_value)
+                total_side_kills[side_name] = kills
+
+            # Now complete the ticket with replacement tracking
+            await interaction.response.send_message("Processing ticket completion...", ephemeral=True)
+            await self._complete_ticket_with_replacements(interaction, total_side_kills)
+
+        except Exception as e:
+            try:
+                await interaction.response.send_message(f"Error: {str(e)}", ephemeral=True)
+            except:
+                pass
+
+    async def _complete_ticket_with_replacements(self, interaction: discord.Interaction, total_side_kills):
+        """Complete ticket with replacement tracking for spamming mode"""
+        people_who_left = {}
+        replacement_rewards = {}
+        helpers_with_replacements = set()
+
+        # Step 1: Process each person who left
+        for replacement in self.parent_view.replacements_with_ids:
+            left_id = replacement['left_id']
+            left_mention = replacement['left_mention']
+            kills_by_left = replacement.get('kills_by_left', {})
+            replacement_id = replacement.get('replacement_id')
+
+            # Award points to person who left based on their kills
+            left_points = 0
+            boss_names = []
+            for side_name, kills in kills_by_left.items():
+                if kills > 0:
+                    boss_key = f"TempleShrine-{side_name}"
+                    points_per_kill = BOSS_POINTS.get(boss_key, 1)
+                    side_points = kills * points_per_kill
+                    left_points += side_points
+                    boss_names.extend([boss_key] * kills)
+
+            if left_points > 0:
+                new_total = add_points(left_id, left_points, boss_names)
+                people_who_left[left_id] = {
+                    'mention': left_mention,
+                    'kills': kills_by_left,
+                    'points': left_points,
+                    'new_total': new_total
+                }
+
+            # Calculate remaining kills for the replacement
+            if replacement_id is not None:
+                helpers_with_replacements.add(replacement_id)
+                remaining_kills = {}
+                remaining_points = 0
+                remaining_boss_names = []
+
+                for side_name, total_kills in total_side_kills.items():
+                    left_kills = kills_by_left.get(side_name, 0)
+                    remaining = total_kills - left_kills
+                    if remaining > 0:
+                        remaining_kills[side_name] = remaining
+                        boss_key = f"TempleShrine-{side_name}"
+                        points_per_kill = BOSS_POINTS.get(boss_key, 1)
+                        side_points = remaining * points_per_kill
+                        remaining_points += side_points
+                        remaining_boss_names.extend([boss_key] * remaining)
+
+                if replacement_id not in replacement_rewards:
+                    replacement_rewards[replacement_id] = {'points': 0, 'boss_names': []}
+
+                replacement_rewards[replacement_id]['points'] += remaining_points
+                replacement_rewards[replacement_id]['boss_names'].extend(remaining_boss_names)
+
+        # Step 2: Award points to helpers
+        helper_rewards = []
+        for helper_id, helper_mention in self.parent_view.helper_view.helpers:
+            if helper_id in replacement_rewards:
+                # This helper replaced someone - award only remaining kills
+                reward_info = replacement_rewards[helper_id]
+                points = reward_info['points']
+                boss_names = reward_info['boss_names']
+                new_total = add_points(helper_id, points, boss_names)
+                helper_rewards.append(f"{helper_mention}: +{points} points (Total: {new_total})")
+            else:
+                # This helper was NOT a replacement - award ALL kills
+                total_points = 0
+                all_boss_names = []
+                for side_name, kills in total_side_kills.items():
+                    if kills > 0:
+                        boss_key = f"TempleShrine-{side_name}"
+                        points_per_kill = BOSS_POINTS.get(boss_key, 1)
+                        side_points = kills * points_per_kill
+                        total_points += side_points
+                        all_boss_names.extend([boss_key] * kills)
+
+                new_total = add_points(helper_id, total_points, all_boss_names)
+                helper_rewards.append(f"{helper_mention}: +{total_points} points (Total: {new_total})")
+
+        # Add people who left to helper rewards
+        for left_id, left_info in people_who_left.items():
+            helper_rewards.append(f"{left_info['mention']}: +{left_info['points']} points (Total: {left_info['new_total']}) [Left mid-run]")
+
+        # Build completion summary
+        total_kills = sum(total_side_kills.values())
+        total_points = 0
+        completion_summary_lines = []
+
+        for side_name, kills in total_side_kills.items():
+            if kills > 0:
+                boss_key = f"TempleShrine-{side_name}"
+                points_per_kill = BOSS_POINTS.get(boss_key, 1)
+                side_points = kills * points_per_kill
+                total_points += side_points
+                completion_summary_lines.append(f"**{side_name} Side:** {kills} kills × {points_per_kill}pt = {side_points} points")
+
+        completion_summary = "\n".join(completion_summary_lines)
+        completion_summary += f"\n\n**Total:** {total_kills} kills"
+
+        # Add replacement info
+        if self.parent_view.replacements_with_ids:
+            completion_summary += "\n\n**Replacements:**"
+            for repl in self.parent_view.replacements_with_ids:
+                left_name = repl['left_mention']
+                repl_name = repl['replacement_mention']
+                kills_by_left = repl.get('kills_by_left', {})
+
+                if any(k > 0 for k in kills_by_left.values()):
+                    kills_str = ", ".join([f"{side}: {kills}" for side, kills in kills_by_left.items() if kills > 0])
+                    left_points = sum(BOSS_POINTS.get(f"TempleShrine-{s}", 1) * k for s, k in kills_by_left.items())
+                    completion_summary += f"\n• {repl_name} replaced {left_name}"
+                    completion_summary += f"\n  ↳ {left_name} completed: {kills_str} ({left_points}pts)"
+                else:
+                    completion_summary += f"\n• {repl_name} replaced {left_name}"
+                    completion_summary += f"\n  ↳ {left_name} left before helping (0pts)"
+
+        # Mark ticket as completed
+        self.parent_view.helper_view.ticket_completed = True
+        self.parent_view.button.disabled = True
+        await self.parent_view.message.edit(view=self.parent_view.helper_view)
+
+        # Create completion embed
+        completion_embed = discord.Embed(
+            title="✅ TempleShrine Spamming Ticket Completed!",
+            color=discord.Color.purple(),
+            timestamp=discord.utils.utcnow()
+        )
+
+        completion_embed.add_field(name="Requester", value=f"<@{self.parent_view.helper_view.requester_id}>", inline=False)
+        completion_embed.add_field(name="Completion Summary", value=completion_summary, inline=False)
+        completion_embed.add_field(name="Helper Rewards", value="\n".join(helper_rewards), inline=False)
+
+        guild = interaction.guild
+        ticket_logs_channel = discord.utils.get(guild.text_channels, name="ticket-logs")
+
+        if ticket_logs_channel:
+            await ticket_logs_channel.send(embed=completion_embed)
+            await interaction.followup.send("Ticket completed! Summary sent to ticket-logs. Channel will be deleted in 10 seconds.", ephemeral=True)
+            await asyncio.sleep(10)
+            try:
+                await interaction.channel.delete(reason="TempleShrine Spamming ticket completed")
+            except Exception as e:
+                logger.error(f"Error deleting channel: {e}")
+        else:
+            await interaction.followup.send(embed=completion_embed, ephemeral=False)
+
+
 class UltraWeekliesView(ui.View):
     """View with UltraWeeklies and UltraDailies buttons for ticket reminders"""
 
@@ -4897,11 +6080,10 @@ class UltraWeekliesView(ui.View):
 
 @bot.tree.command(name="deployticket")
 @app_commands.default_permissions(administrator=True)
-async def deployticket_command(interaction: discord.Interaction):
-    """Deploy ticket reminders embed"""
+@app_commands.describe(channel="The channel to send the ticket reminders embed to")
+async def deployticket_command(interaction: discord.Interaction, channel: discord.TextChannel):
+    """Deploy ticket reminders embed to a specific channel (Admin only)"""
     try:
-        await interaction.response.defer(ephemeral=False)
-
         embed = discord.Embed(
             title="📌 Reminders",
             description=(
@@ -4922,7 +6104,10 @@ async def deployticket_command(interaction: discord.Interaction):
         )
 
         view = UltraWeekliesView()
-        await interaction.followup.send(embed=embed, view=view)
+
+        # Send to the specified channel
+        await channel.send(embed=embed, view=view)
+        await interaction.response.send_message(f"✅ Ticket reminders embed deployed to {channel.mention}", ephemeral=True)
     except Exception as e:
         try:
             if not interaction.response.is_done():

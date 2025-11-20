@@ -11,8 +11,8 @@ HOST = os.environ.get("CHAR_DATA_HOST", "127.0.0.1")
 PORT = int(os.environ.get("CHAR_DATA_PORT", "4568"))
 
 
-class SWFScannerClient:
-    """Async client wrapper used by legacy rendering code."""
+class CharDataClient:
+    """Async client wrapper around the character data TCP service."""
 
     def __init__(self, host: str = HOST, port: int = PORT, timeout: float = 15.0):
         self.host = host
@@ -34,7 +34,9 @@ async def get_char_data(char_name: str, host: str = HOST, port: int = PORT, time
             asyncio.open_connection(host, port),
             timeout=timeout
         )
-    except (asyncio.TimeoutError, ConnectionRefusedError) as e:
+    except (asyncio.TimeoutError, OSError) as e:
+        # Catches: ConnectionRefusedError, ConnectionResetError, socket.gaierror (DNS failures),
+        # and other network-related OSErrors
         print(f"Error connecting to scanner service: {e}")
         return {"error": "The character data service is currently unavailable. Please try again later."}
 
@@ -46,11 +48,12 @@ async def get_char_data(char_name: str, host: str = HOST, port: int = PORT, time
         response_data = await asyncio.wait_for(reader.read(), timeout=timeout)
         if not response_data:
             return {"error": "Received no data from the scanner service."}
-            
+
         # Decode and parse the JSON data
         char_data = json.loads(response_data.decode())
-        
-    except (asyncio.TimeoutError, json.JSONDecodeError) as e:
+
+    except (asyncio.TimeoutError, json.JSONDecodeError, OSError) as e:
+        # Catches timeout, JSON errors, and network errors (connection drops during read)
         print(f"Error reading/parsing data from scanner: {e}")
         return {"error": "Failed to retrieve valid character data."}
     finally:
@@ -59,6 +62,3 @@ async def get_char_data(char_name: str, host: str = HOST, port: int = PORT, time
 
     return char_data
 
-
-# Default instance used by older code paths (e.g., `swfscannerclient`)
-swfscannerclient = SWFScannerClient()

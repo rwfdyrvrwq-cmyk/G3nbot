@@ -18,6 +18,7 @@ Improvements over base implementation:
 from typing import Optional, Dict, Any, Union
 import re
 import requests
+from urllib.parse import unquote_plus
 from bs4 import BeautifulSoup
 from bs4.element import NavigableString
 import aiohttp
@@ -333,7 +334,7 @@ async def scrape_character(username: str) -> Optional[Dict[str, Any]]:
                 'character_image': None,
                 'badges_count': 0,
                 'inventory_count': 0,
-                'flashvars': {}  # Store all FlashVars for renderer
+                'flashvars': {}  # Store all FlashVars for downstream consumers
             }
             
             # Parse FlashVars to get both equipped and cosmetics items
@@ -343,33 +344,34 @@ async def scrape_character(username: str) -> Optional[Dict[str, Any]]:
                 # Decode HTML entities
                 flashvars_raw = flashvars_raw.replace('&amp;', '&')
                 
-                # Parse all FlashVars into a dict for the renderer
+                # Parse all FlashVars into a dict for any downstream tooling
                 for param in flashvars_raw.split('&'):
                     if '=' in param:
                         key, value = param.split('=', 1)
                         if value and value != 'none':
-                            character_data['flashvars'][key] = value
+                            # URL-decode the value so downstream consumers get clean strings
+                            character_data['flashvars'][key] = unquote_plus(value)
                 
-                # Parse equipped items (names and files)
+                # Parse equipped items (names and files) - URL decode all values
                 equipped_weapon = re.search(r'strWeaponName=([^&]+)', flashvars_raw)
                 equipped_armor = re.search(r'strArmorName=([^&]+)', flashvars_raw)
                 equipped_helm = re.search(r'strHelmName=([^&]+)', flashvars_raw)
                 equipped_cape = re.search(r'strCapeName=([^&]+)', flashvars_raw)
                 equipped_pet = re.search(r'strPetName=([^&]+)', flashvars_raw)
                 equipped_misc = re.search(r'strMiscName=([^&]+)', flashvars_raw)
-                
+
                 if equipped_weapon and equipped_weapon.group(1):
-                    character_data['equipment']['Weapon'] = equipped_weapon.group(1)
+                    character_data['equipment']['Weapon'] = unquote_plus(equipped_weapon.group(1))
                 if equipped_armor and equipped_armor.group(1):
-                    character_data['equipment']['Armor'] = equipped_armor.group(1)
+                    character_data['equipment']['Armor'] = unquote_plus(equipped_armor.group(1))
                 if equipped_helm and equipped_helm.group(1):
-                    character_data['equipment']['Helm'] = equipped_helm.group(1)
+                    character_data['equipment']['Helm'] = unquote_plus(equipped_helm.group(1))
                 if equipped_cape and equipped_cape.group(1):
-                    character_data['equipment']['Cape'] = equipped_cape.group(1)
+                    character_data['equipment']['Cape'] = unquote_plus(equipped_cape.group(1))
                 if equipped_pet and equipped_pet.group(1):
-                    character_data['equipment']['Pet'] = equipped_pet.group(1)
+                    character_data['equipment']['Pet'] = unquote_plus(equipped_pet.group(1))
                 if equipped_misc and equipped_misc.group(1):
-                    character_data['equipment']['Misc'] = equipped_misc.group(1)
+                    character_data['equipment']['Misc'] = unquote_plus(equipped_misc.group(1))
                 
                 # Parse cosmetics items (strCust prefix)
                 cosmetic_weapon = re.search(r'strCustWeaponName=([^&]+)', flashvars_raw)
@@ -379,15 +381,15 @@ async def scrape_character(username: str) -> Optional[Dict[str, Any]]:
                 cosmetic_pet = re.search(r'strCustPetName=([^&]+)', flashvars_raw)
                 
                 if cosmetic_weapon and cosmetic_weapon.group(1):
-                    character_data['cosmetics']['Weapon'] = cosmetic_weapon.group(1)
+                    character_data['cosmetics']['Weapon'] = unquote_plus(cosmetic_weapon.group(1))
                 if cosmetic_armor and cosmetic_armor.group(1):
-                    character_data['cosmetics']['Armor'] = cosmetic_armor.group(1)
+                    character_data['cosmetics']['Armor'] = unquote_plus(cosmetic_armor.group(1))
                 if cosmetic_helm and cosmetic_helm.group(1):
-                    character_data['cosmetics']['Helm'] = cosmetic_helm.group(1)
+                    character_data['cosmetics']['Helm'] = unquote_plus(cosmetic_helm.group(1))
                 if cosmetic_cape and cosmetic_cape.group(1):
-                    character_data['cosmetics']['Cape'] = cosmetic_cape.group(1)
+                    character_data['cosmetics']['Cape'] = unquote_plus(cosmetic_cape.group(1))
                 if cosmetic_pet and cosmetic_pet.group(1):
-                    character_data['cosmetics']['Pet'] = cosmetic_pet.group(1)
+                    character_data['cosmetics']['Pet'] = unquote_plus(cosmetic_pet.group(1))
             
             # Parse labels using improved method (inspired by MultusAQW)
             # Try div.card-body label approach first (more robust)

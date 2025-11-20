@@ -8,15 +8,39 @@ from urllib.parse import parse_qs, unquote
 HOST = os.environ.get("CHAR_DATA_HOST", "127.0.0.1")
 PORT = int(os.environ.get("CHAR_DATA_PORT", "4568"))
 
+
+def _extract(parsed_vars: dict, key: str, default: str = "N/A") -> str:
+    """
+    Helper to safely fetch a single FlashVars value.
+
+    FlashVars are returned as lists and sometimes include placeholders like
+    "none". Treat empty strings and placeholder values as missing so the bot
+    can display a consistent "N/A" marker.
+    """
+    values = parsed_vars.get(key)
+    if not values:
+        return default
+
+    value = values[0].strip()
+    if not value:
+        return default
+
+    if value.lower() in {"none", "null"}:
+        return default
+
+    return value
+
+
 async def get_char_data(char_name: str):
     """Fetches character data from the AQW character page."""
     try:
-        url = f"https://www.aq.com/character.asp?id={char_name}"
+        url = "http://account.aq.com/CharPage"
+        params = {"id": char_name}
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36'
         }
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, headers=headers, follow_redirects=True)
+            response = await client.get(url, params=params, headers=headers, follow_redirects=True)
             response.raise_for_status()
 
         html_content = response.text
@@ -44,14 +68,20 @@ async def get_char_data(char_name: str):
         # Extracting specific data points
         # The values in parsed_vars are lists, so we take the first element
         data = {
-            "name": parsed_vars.get("strName", [char_name])[0],
-            "level": parsed_vars.get("intLevel", ["N/A"])[0],
-            "class": parsed_vars.get("strClassName", ["N/A"])[0],
-            "helm": parsed_vars.get("strHelmName", ["N/A"])[0],
-            "armor": parsed_vars.get("strArmorName", ["N/A"])[0],
-            "cape": parsed_vars.get("strCapeName", ["N/A"])[0],
-            "weapon": parsed_vars.get("strWeaponName", ["N/A"])[0],
-            "pet": parsed_vars.get("strPetName", ["N/A"])[0],
+            "name": _extract(parsed_vars, "strName", char_name),
+            "level": _extract(parsed_vars, "intLevel"),
+            "class": _extract(parsed_vars, "strClassName"),
+            "helm": _extract(parsed_vars, "strHelmName"),
+            "armor": _extract(parsed_vars, "strArmorName"),
+            "cape": _extract(parsed_vars, "strCapeName"),
+            "weapon": _extract(parsed_vars, "strWeaponName"),
+            "pet": _extract(parsed_vars, "strPetName"),
+            # Cosmetic slots surfaced to the Discord bot
+            "co_armor": _extract(parsed_vars, "strCustArmorName"),
+            "co_helm": _extract(parsed_vars, "strCustHelmName"),
+            "co_cape": _extract(parsed_vars, "strCustCapeName"),
+            "co_weapon": _extract(parsed_vars, "strCustWeaponName"),
+            "co_pet": _extract(parsed_vars, "strCustPetName"),
         }
         return data
 

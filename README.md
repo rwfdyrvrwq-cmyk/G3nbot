@@ -1,15 +1,36 @@
 # AQW Discord Verification Bot
 
-An always-on AdventureQuest Worlds server assistant focused on secure player verification, detailed CharPage lookups, and in-server ticketing utilities. The bot orchestrates the `/verify` workflow with guild-specific admin channels, renders `/char` embeds powered by a bundled FlashVars scraper microservice, and rounds out daily operations with AQW wiki lookups, shop data, and TempleShrine/Ultra deployment helpers with advanced replacement tracking and leaderboard integration. It is designed for multi-guild deployments, uses slash commands exclusively, and ships with a lightweight TCP scraper process.
+An always-on AdventureQuest Worlds server assistant focused on secure player verification with daily automated checks, detailed CharPage lookups, and in-server ticketing utilities. The bot orchestrates verification workflows with guild-specific admin channels, renders `/char` embeds powered by a bundled FlashVars scraper microservice, and rounds out daily operations with AQW wiki lookups, shop data, and TempleShrine/Ultra deployment helpers with advanced replacement tracking and leaderboard integration. It is designed for multi-guild deployments, uses slash commands exclusively, and ships with a lightweight TCP scraper process.
 
 ## Features
 
-### `/verify` - Character Verification
-- Verifies character ownership by comparing user input with CharPage data
-- User provides IGN (In-Game Name) and optional Guild
-- Creates admin-only verification channel with results
-- Automatically updates Discord nickname to IGN on approval
-- Handles permission errors gracefully
+### Character Verification System
+- **Automated Daily Verification**: Checks all verified users' IGN and Guild daily at 12:00 AM UTC
+- **Role-Based Access**: Assigns "Verified" role upon approval
+- **Smart Error Handling**: 3-strike system for network errors with progressive warnings
+- **Re-verification Support**: Users can re-verify if their character information changes
+- **Admin Controls**: `/verificationcheck` command to enable/disable/monitor checks
+- **Audit Logging**: All verification events logged to #verification-logs channel
+
+**Verification Flow:**
+1. Admin deploys verification embed using `/deployverification`
+2. User clicks "Start Verification" button
+3. User enters IGN and Guild in modal
+4. Bot compares input against CharPage data
+5. Admin-only verification channel created with results
+6. Admin clicks "Finish Verification" to approve
+7. User receives "Verified" role and nickname updated to IGN
+8. User data saved for daily automated checks
+
+**Daily Verification Checks:**
+- Fetches current character data from AQ.com CharPage
+- Compares stored IGN and Guild (case-insensitive)
+- Removes "Verified" role if data doesn't match
+- Sends DM notifications to affected users
+- Network error handling with 3-strike system:
+  - Strike 1: Log to #verification-logs
+  - Strike 2: Warning DM sent to user
+  - Strike 3: Role removed, user must re-verify
 
 ### `/char` - Character Lookup
 - Pulls the official CharPage via the bundled FlashVars scraper service
@@ -23,10 +44,6 @@ An always-on AdventureQuest Worlds server assistant focused on secure player ver
 - Searches AQW Wiki (aqwwiki.wikidot.com)
 - Shows detailed item information with images
 - Direct wiki links for more details
-
-### `/shop` - Shop Information
-- Looks up shop locations and contents
-- Shows available items and acquisition methods
 
 ### `/deployticket` - Deployment Ticket System (Admin Only)
 - Creates interactive tickets for boss runs with helper tracking
@@ -49,15 +66,25 @@ An always-on AdventureQuest Worlds server assistant focused on secure player ver
   - Leaderboard integration with `/leaderboard`, `/myscore`, `/resetleaderboard`
 - Displays friendly nicknames/usernames throughout the UI
 
+### `/verificationcheck` - Verification System Management (Admin Only)
+- **enable**: Enable daily verification checks
+- **disable**: Disable daily verification checks
+- **status**: View statistics (checks run, users removed, verified count)
+- **runnow**: Manually trigger verification check immediately
+
 ## Technical Architecture
 
 ### Character Data Pipeline
-- **char_data_scraper.py**  
+- **char_data_scraper.py**
   Async HTTP fetcher that extracts FlashVars from the official CharPage and serves the parsed data over a lightweight TCP server (default `127.0.0.1:4568`).
-- **scanner_client.py**  
+- **scanner_client.py**
   Async TCP client used by `/char` to talk to the scraper service. It handles connection failures gracefully and surfaces friendly error messages to Discord users.
-- **bot.py**  
+- **bot.py**
   Calls `get_char_data()` whenever `/char` is invoked and builds embeds from the returned equipment/cosmetic information.
+
+### Verification Data Storage
+- **verified_users.json**: Stores verified user data (IGN, Guild, timestamps, failed check count)
+- **verification_config.json**: System configuration and statistics
 
 ### Data Scraping
 - **scraper.py**: Async CharPage parser (49 FlashVars parameters)
@@ -69,6 +96,7 @@ An always-on AdventureQuest Worlds server assistant focused on secure player ver
 - Ephemeral responses to prevent spam
 - Admin-only verification channels
 - Automatic nickname management
+- Daily automated verification checks
 - Comprehensive error handling
 
 ## Quick Start
@@ -90,6 +118,7 @@ pip install -r requirements.txt
 
 1. Create a bot application on the [Discord Developer Portal](https://discord.com/developers/applications)
 2. Enable these bot permissions:
+   - **Manage Roles** (required for "Verified" role assignment)
    - **Manage Nicknames** (required for nickname changes)
    - **Manage Channels** (required for creating verification channels)
    - **Send Messages**
@@ -112,7 +141,15 @@ DISCORD_TOKEN="your_bot_token_here"
 # GUILD_ID=123456789012345678
 ```
 
-### 5. Run the bot
+### 5. Create "Verified" Role
+
+Before deploying verification:
+1. Go to Server Settings → Roles
+2. Create a new role called "Verified" (exact name)
+3. Position it appropriately in your role hierarchy
+4. Assign desired permissions
+
+### 6. Run the bot
 
 ```bash
 python bot.py
@@ -133,16 +170,39 @@ LOG_DIR="$HOME/verificationbot/logs" ./start_all.sh
 
 ## Usage
 
-### Verifying a Character
+### Setting Up Verification
 
-1. User runs `/verify`
-2. Clicks "Start Verification" button
-3. Enters their IGN and Guild in the modal
-4. Bot compares against CharPage data
-5. If successful, admin channel is created
-6. Admin (or user) clicks "Finish Verification"
-7. User's nickname changes to their IGN
-8. Verification channel is deleted
+1. Create "Verified" role in your Discord server
+2. Admin runs `/deployverification #channel-name`
+3. Verification embed posted to specified channel
+4. If "Verified" role doesn't exist, admin receives a warning
+
+### User Verification Flow
+
+1. User clicks "Start Verification" button on embed
+2. Enters IGN and Guild in modal
+3. Bot compares against CharPage data
+4. Admin-only verification channel created
+5. Admin reviews and clicks "Finish Verification"
+6. User gets "Verified" role and nickname updated
+7. User data saved for daily automated checks
+
+### Daily Verification Checks
+
+The bot automatically checks all verified users daily at 12:00 AM UTC:
+- Fetches current character data from AQ.com
+- Compares stored IGN and Guild
+- Removes role if data doesn't match
+- Logs all events to #verification-logs channel
+- Sends DM notifications to affected users
+
+Admins can manage checks with `/verificationcheck`:
+```
+/verificationcheck enable   # Enable daily checks
+/verificationcheck disable  # Disable daily checks
+/verificationcheck status   # View statistics
+/verificationcheck runnow   # Run check immediately
+```
 
 ### Creating Deployment Tickets (Admin Only)
 
@@ -195,6 +255,8 @@ verificationbot/
 ├── get_guild_id.py         # Guild lookup utility
 ├── requirements.txt        # Python dependencies
 ├── start_all.sh            # Supervisor for scraper + bot
+├── verified_users.json     # Verified user data (auto-generated)
+├── verification_config.json # Verification system config (auto-generated)
 ├── .env / .env.example     # Environment variables (gitignored template)
 ├── QUICK_REFERENCE.md      # Ops quick reference
 ├── SOLUTIONS.md            # Character data service guide
@@ -209,12 +271,14 @@ verificationbot/
 - aiohttp 3.10.11+ (HTTP sessions)
 - beautifulsoup4 4.14.2+ (HTML parsing)
 - python-dotenv 1.2.1+
+- requests 2.32.5+ (HTTP requests)
 
 ## Security Notes
 
 - ✅ `.env` file is protected by `.gitignore`
 - ✅ Bot token is never committed to the repository
 - ✅ Only environment variables are used for sensitive data
+- ✅ Verification data stored locally in JSON files
 - ⚠️ Ensure your bot role is positioned correctly in Discord server for nickname changes
 - ⚠️ Keep your bot token secret - regenerate if exposed
 
@@ -230,10 +294,20 @@ verificationbot/
 2. Ensure bot's role is **above** the user's highest role in server settings
 3. Bot cannot change server owner's nickname
 
+### "Verified" role not assigned
+1. Ensure "Verified" role exists in server
+2. Check bot has "Manage Roles" permission
+3. Ensure bot's role is **above** "Verified" role in server settings
+
 ### Commands not showing
 - Commands sync automatically on bot startup
 - Wait 1-2 minutes for Discord to update
 - Try restarting the bot
+
+### Daily verification checks not running
+- Check bot logs for "Daily verification check task started"
+- Use `/verificationcheck status` to verify checks are enabled
+- Checks run at 12:00 AM UTC daily
 
 ## Health Checks
 
@@ -242,16 +316,6 @@ verificationbot/
 - **Process status**: Inspect `/tmp/*.pid` files written by `start_all.sh` and `tail -f bot.log` / `scraper.log`.
 - **Scraper availability**: `lsof -iTCP:4568` (or your custom port) should show the character data server while running.
 - **Cleanup**: The `.gitignore` excludes logs, PID files, and other runtime artifacts so the working tree stays clean after tests.
-
-## Future Enhancements
-
-Potential features to add:
-- Automatic role assignment on verification
-- Persistent storage of verified users
-- Verification logs and analytics
-- Custom deployment helper content per option
-- Re-verification system
-- Verification expiry
 
 ## License
 

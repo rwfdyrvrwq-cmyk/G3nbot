@@ -20,7 +20,11 @@ async def scrape_shop_items(shop_name: str) -> Optional[Dict[str, Any]]:
     slug = slug.lower()
     slug = re.sub(r'-+', '-', slug)
     slug = slug.strip('-')
-    
+
+    # Guard against empty slugs (e.g., "???", "🎮") to avoid fetching the wiki homepage
+    if not slug:
+        return None
+
     url = f'http://aqwwiki.wikidot.com/{slug}'
     
     headers = {
