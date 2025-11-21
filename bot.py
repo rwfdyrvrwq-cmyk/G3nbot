@@ -121,10 +121,17 @@ def save_requester_stats(requester_data):
         json.dump(requester_data, f, indent=2)
 
 
-def track_ticket_created(user_id, ticket_type):
-    """Track when a user creates a ticket"""
-    requester_data = load_requester_stats()
+def track_ticket_created(user_id, ticket_type, guild_id):
+    """Track when a user creates a ticket (per-server)"""
+    all_requester_data = load_requester_stats()
     user_id_str = str(user_id)
+    guild_id_str = str(guild_id)
+
+    # Ensure guild exists in data structure
+    if guild_id_str not in all_requester_data:
+        all_requester_data[guild_id_str] = {"users": {}}
+
+    requester_data = all_requester_data[guild_id_str]["users"]
 
     if user_id_str not in requester_data:
         requester_data[user_id_str] = {
@@ -141,58 +148,72 @@ def track_ticket_created(user_id, ticket_type):
         requester_data[user_id_str]["ticket_types"][ticket_type] = 0
     requester_data[user_id_str]["ticket_types"][ticket_type] += 1
 
-    save_requester_stats(requester_data)
+    save_requester_stats(all_requester_data)
     return requester_data[user_id_str]["tickets_created"]
 
 
-def add_points(user_id, points, bosses):
-    """Add points to a user and track boss completions"""
+def add_points(user_id, points, bosses, guild_id):
+    """Add points to a user and track boss completions (per-server)"""
     points_data = load_points()
     user_id_str = str(user_id)
+    guild_id_str = str(guild_id)
 
-    if user_id_str not in points_data:
-        points_data[user_id_str] = {
+    # Ensure guild exists in data structure
+    if guild_id_str not in points_data:
+        points_data[guild_id_str] = {"users": {}}
+
+    guild_users = points_data[guild_id_str]["users"]
+
+    if user_id_str not in guild_users:
+        guild_users[user_id_str] = {
             "total_points": 0,
             "bosses": {},
             "tickets_completed": 0
         }
 
     # Handle old format (just a number)
-    if isinstance(points_data[user_id_str], (int, float)):
-        points_data[user_id_str] = {
-            "total_points": points_data[user_id_str],
+    if isinstance(guild_users[user_id_str], (int, float)):
+        guild_users[user_id_str] = {
+            "total_points": guild_users[user_id_str],
             "bosses": {},
             "tickets_completed": 0
         }
 
     # Add points
-    points_data[user_id_str]["total_points"] += points
+    guild_users[user_id_str]["total_points"] += points
 
     # Track boss completions
-    if "bosses" not in points_data[user_id_str]:
-        points_data[user_id_str]["bosses"] = {}
+    if "bosses" not in guild_users[user_id_str]:
+        guild_users[user_id_str]["bosses"] = {}
 
     for boss in bosses:
-        if boss not in points_data[user_id_str]["bosses"]:
-            points_data[user_id_str]["bosses"][boss] = 0
-        points_data[user_id_str]["bosses"][boss] += 1
+        if boss not in guild_users[user_id_str]["bosses"]:
+            guild_users[user_id_str]["bosses"][boss] = 0
+        guild_users[user_id_str]["bosses"][boss] += 1
 
     # Increment tickets completed
-    if "tickets_completed" not in points_data[user_id_str]:
-        points_data[user_id_str]["tickets_completed"] = 0
-    points_data[user_id_str]["tickets_completed"] += 1
+    if "tickets_completed" not in guild_users[user_id_str]:
+        guild_users[user_id_str]["tickets_completed"] = 0
+    guild_users[user_id_str]["tickets_completed"] += 1
 
     save_points(points_data)
-    return points_data[user_id_str]["total_points"]
+    return guild_users[user_id_str]["total_points"]
 
 
-def track_ticket_join(user_id):
-    """Track when a user joins a ticket"""
+def track_ticket_join(user_id, guild_id):
+    """Track when a user joins a ticket (per-server)"""
     points_data = load_points()
     user_id_str = str(user_id)
+    guild_id_str = str(guild_id)
 
-    if user_id_str not in points_data:
-        points_data[user_id_str] = {
+    # Ensure guild exists in data structure
+    if guild_id_str not in points_data:
+        points_data[guild_id_str] = {"users": {}}
+
+    guild_users = points_data[guild_id_str]["users"]
+
+    if user_id_str not in guild_users:
+        guild_users[user_id_str] = {
             "total_points": 0,
             "bosses": {},
             "tickets_joined": 0,
@@ -200,18 +221,18 @@ def track_ticket_join(user_id):
         }
 
     # Handle old format
-    if isinstance(points_data[user_id_str], (int, float)):
-        points_data[user_id_str] = {
-            "total_points": points_data[user_id_str],
+    if isinstance(guild_users[user_id_str], (int, float)):
+        guild_users[user_id_str] = {
+            "total_points": guild_users[user_id_str],
             "bosses": {},
             "tickets_joined": 0,
             "tickets_completed": 0
         }
 
     # Increment tickets joined
-    if "tickets_joined" not in points_data[user_id_str]:
-        points_data[user_id_str]["tickets_joined"] = 0
-    points_data[user_id_str]["tickets_joined"] += 1
+    if "tickets_joined" not in guild_users[user_id_str]:
+        guild_users[user_id_str]["tickets_joined"] = 0
+    guild_users[user_id_str]["tickets_joined"] += 1
 
     save_points(points_data)
 
@@ -285,38 +306,57 @@ def get_verified_user(user_id, guild_id):
     return None
 
 def load_verification_config():
-    """Load verification config from JSON file"""
+    """Load verification config from JSON file (per-server)"""
     try:
         if VERIFICATION_CONFIG_FILE.exists():
             with open(VERIFICATION_CONFIG_FILE, 'r') as f:
                 return json.load(f)
-        # Default config
-        return {
-            "daily_check_enabled": True,
-            "last_check_time": None,
-            "total_checks_run": 0,
-            "users_removed_total": 0
-        }
+        return {}
     except Exception as e:
         logger.error(f"Error loading verification config: {e}")
-        return {
-            "daily_check_enabled": True,
-            "last_check_time": None,
-            "total_checks_run": 0,
-            "users_removed_total": 0
-        }
+        return {}
 
 def save_verification_config(data):
-    """Save verification config to JSON file"""
+    """Save verification config to JSON file (per-server)"""
     try:
         with open(VERIFICATION_CONFIG_FILE, 'w') as f:
             json.dump(data, f, indent=2)
     except Exception as e:
         logger.error(f"Error saving verification config: {e}")
 
-def is_daily_check_enabled():
-    """Check if daily verification checks are enabled"""
-    config = load_verification_config()
+def get_guild_verification_config(guild_id):
+    """Get verification config for a specific guild"""
+    all_config = load_verification_config()
+    guild_id_str = str(guild_id)
+
+    if guild_id_str not in all_config:
+        all_config[guild_id_str] = {
+            "daily_check_enabled": True,
+            "last_check_time": None,
+            "total_checks_run": 0,
+            "users_removed_total": 0
+        }
+    return all_config[guild_id_str]
+
+def update_guild_verification_config(guild_id, updates):
+    """Update verification config for a specific guild"""
+    all_config = load_verification_config()
+    guild_id_str = str(guild_id)
+
+    if guild_id_str not in all_config:
+        all_config[guild_id_str] = {
+            "daily_check_enabled": True,
+            "last_check_time": None,
+            "total_checks_run": 0,
+            "users_removed_total": 0
+        }
+
+    all_config[guild_id_str].update(updates)
+    save_verification_config(all_config)
+
+def is_daily_check_enabled_for_guild(guild_id):
+    """Check if daily verification checks are enabled for a specific guild"""
+    config = get_guild_verification_config(guild_id)
     return config.get("daily_check_enabled", True)
 
 async def get_or_create_verification_logs_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
@@ -388,58 +428,6 @@ def set_verified_role_name(guild_id: int, role_name: str):
     logger.info(f"Set verified role name for guild {guild_id} to: {role_name}")
 
 # ==================== END SERVER CONFIG HELPERS ====================
-
-# ==================== DATA MIGRATION ====================
-
-def migrate_verified_users_to_per_server():
-    """Migrate old flat structure to new per-server structure"""
-    try:
-        if not VERIFIED_USERS_FILE.exists():
-            return  # No data to migrate
-
-        with open(VERIFIED_USERS_FILE, 'r') as f:
-            data = json.load(f)
-
-        # Check if already migrated (has guild_id keys with "users" sub-key)
-        if data and any(isinstance(v, dict) and "users" in v for v in data.values()):
-            logger.info("Verified users data already migrated to per-server format")
-            return
-
-        # Old format detected - migrate it
-        if data:
-            logger.info(f"Migrating {len(data)} users from old format to per-server format")
-
-            # Get the first configured guild or use a default
-            # In production, you should configure which guild to migrate to
-            from os import getenv
-            guild_ids_env = getenv("GUILD_IDS")
-            if guild_ids_env:
-                default_guild = guild_ids_env.split(',')[0].strip()
-            else:
-                default_guild = getenv("GUILD_ID", "unknown")
-
-            # Create new structure
-            new_data = {
-                default_guild: {
-                    "users": data  # Move all old users to first guild
-                }
-            }
-
-            # Backup old data
-            backup_file = VERIFIED_USERS_FILE.parent / "verified_users_backup.json"
-            with open(backup_file, 'w') as f:
-                json.dump(data, f, indent=2)
-            logger.info(f"Backed up old data to: {backup_file}")
-
-            # Save migrated data
-            with open(VERIFIED_USERS_FILE, 'w') as f:
-                json.dump(new_data, f, indent=2)
-
-            logger.info(f"Migration complete: All users migrated to guild {default_guild}")
-    except Exception as e:
-        logger.error(f"Error during migration: {e}")
-
-# ==================== END DATA MIGRATION ====================
 
 # ==================== END VERIFICATION SYSTEM HELPERS ====================
 
@@ -648,12 +636,12 @@ async def run_verification_check(guild: discord.Guild) -> dict:
     for user_id_str in users_to_remove:
         remove_verified_user(user_id_str, guild.id)
 
-    # Update config
-    config = load_verification_config()
-    config["last_check_time"] = datetime.now(timezone.utc).isoformat()
-    config["total_checks_run"] = config.get("total_checks_run", 0) + 1
-    config["users_removed_total"] = config.get("users_removed_total", 0) + results["removed"]
-    save_verification_config(config)
+    # Update config for this guild
+    update_guild_verification_config(guild.id, {
+        "last_check_time": datetime.now(timezone.utc).isoformat(),
+        "total_checks_run": get_guild_verification_config(guild.id).get("total_checks_run", 0) + 1,
+        "users_removed_total": get_guild_verification_config(guild.id).get("users_removed_total", 0) + results["removed"]
+    })
 
     return results
 
@@ -661,15 +649,16 @@ async def run_verification_check(guild: discord.Guild) -> dict:
 async def daily_verification_check():
     """Daily task that runs at 12:00 AM UTC to check all verified users"""
     try:
-        if not is_daily_check_enabled():
-            logger.info("Daily verification check is disabled - skipping")
-            return
-
         logger.info("Starting daily verification check...")
 
         # Run checks for all guilds the bot is in
         for guild in bot.guilds:
             try:
+                # Check if daily checks are enabled for this specific guild
+                if not is_daily_check_enabled_for_guild(guild.id):
+                    logger.info(f"Daily verification check is disabled for {guild.name} - skipping")
+                    continue
+
                 results = await run_verification_check(guild)
                 logger.info(
                     f"Verification check complete for {guild.name}: "
@@ -703,12 +692,17 @@ async def before_daily_verification_check():
     logger.info("Daily verification check task initialized")
 
 
-def get_user_stats(user_id):
-    """Get user statistics"""
+def get_user_stats(user_id, guild_id):
+    """Get user statistics (per-server)"""
     points_data = load_points()
     user_id_str = str(user_id)
+    guild_id_str = str(guild_id)
 
-    if user_id_str not in points_data:
+    # Get guild data
+    guild_data = points_data.get(guild_id_str, {})
+    guild_users = guild_data.get("users", {})
+
+    if user_id_str not in guild_users:
         return {
             "total_points": 0,
             "bosses": {},
@@ -718,7 +712,7 @@ def get_user_stats(user_id):
             "completion_rate": 0.0
         }
 
-    user_data = points_data[user_id_str]
+    user_data = guild_users[user_id_str]
 
     # Handle old format
     if isinstance(user_data, (int, float)):
@@ -1605,9 +1599,6 @@ async def on_ready():
             import traceback
             traceback.print_exc()
 
-        # Migrate verified users data to per-server structure if needed
-        migrate_verified_users_to_per_server()
-
         # Start the daily verification check task
         if not daily_verification_check.is_running():
             daily_verification_check.start()
@@ -1692,35 +1683,44 @@ async def setverifiedrole(interaction: discord.Interaction, role_name: str):
 @app_commands.describe(action="Action to perform: enable, disable, status, or runnow")
 async def verificationcheck(interaction: discord.Interaction, action: Literal["enable", "disable", "status", "runnow"]):
     """Manage daily verification checks (Admin only)"""
-    config = load_verification_config()
+    guild_id = interaction.guild.id
 
     if action == "enable":
-        config["daily_check_enabled"] = True
-        save_verification_config(config)
-        await interaction.response.send_message("✅ Daily verification checks have been **enabled**.", ephemeral=True)
+        update_guild_verification_config(guild_id, {"daily_check_enabled": True})
+        await interaction.response.send_message(
+            f"✅ Daily verification checks have been **enabled** for **{interaction.guild.name}**.",
+            ephemeral=True
+        )
 
     elif action == "disable":
-        config["daily_check_enabled"] = False
-        save_verification_config(config)
-        await interaction.response.send_message("⚠️ Daily verification checks have been **disabled**.", ephemeral=True)
+        update_guild_verification_config(guild_id, {"daily_check_enabled": False})
+        await interaction.response.send_message(
+            f"⚠️ Daily verification checks have been **disabled** for **{interaction.guild.name}**.",
+            ephemeral=True
+        )
 
     elif action == "status":
+        config = get_guild_verification_config(guild_id)
         status = "✅ Enabled" if config.get("daily_check_enabled", True) else "❌ Disabled"
         last_check = config.get("last_check_time", "Never")
         total_checks = config.get("total_checks_run", 0)
         users_removed = config.get("users_removed_total", 0)
 
-        verified_users = load_verified_users()
+        # Get verified user count for this specific guild
+        all_data = load_verified_users()
+        guild_id_str = str(guild_id)
+        guild_data = all_data.get(guild_id_str, {})
+        verified_users = guild_data.get("users", {})
         verified_count = len(verified_users)
 
         embed = discord.Embed(
-            title="📊 Verification Check Status",
+            title=f"📊 Verification Check Status - {interaction.guild.name}",
             color=discord.Color.blue()
         )
         embed.add_field(name="Daily Checks", value=status, inline=False)
         embed.add_field(name="Last Check", value=last_check, inline=False)
-        embed.add_field(name="Total Checks Run", value=str(total_checks), inline=True)
-        embed.add_field(name="Users Removed", value=str(users_removed), inline=True)
+        embed.add_field(name="Total Checks Run", value=f"{total_checks} (this server)", inline=True)
+        embed.add_field(name="Users Removed", value=f"{users_removed} (this server)", inline=True)
         embed.add_field(name="Currently Verified", value=f"{verified_count} users", inline=True)
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -2728,7 +2728,7 @@ class ReplacementBossesView(ui.View):
             left_points = sum(BOSS_POINTS.get(boss, 0) for boss in bosses_covered_by_left)
 
             if left_points > 0 or len(bosses_covered_by_left) > 0:
-                new_total = add_points(left_id, left_points, list(bosses_covered_by_left))
+                new_total = add_points(left_id, left_points, list(bosses_covered_by_left), interaction.guild.id)
                 people_who_left[left_id] = {
                     'mention': left_mention,
                     'bosses_covered': list(bosses_covered_by_left),
@@ -2756,12 +2756,12 @@ class ReplacementBossesView(ui.View):
                 reward_info = replacement_rewards[helper_id]
                 points = reward_info['points']
                 bosses = list(reward_info['bosses'])
-                new_total = add_points(helper_id, points, bosses)
+                new_total = add_points(helper_id, points, bosses, interaction.guild.id)
                 helper_rewards.append(f"{helper_mention}: +{points} points (Total: {new_total})")
             else:
                 # This helper was NOT a replacement - award ALL bosses
                 total_points = sum(BOSS_POINTS.get(boss, 0) for boss in all_bosses)
-                new_total = add_points(helper_id, total_points, list(all_bosses))
+                new_total = add_points(helper_id, total_points, list(all_bosses), interaction.guild.id)
                 helper_rewards.append(f"{helper_mention}: +{total_points} points (Total: {new_total})")
 
         # Add people who left to helper rewards
@@ -2895,7 +2895,7 @@ class HelperView(ui.View):
                 unfilled_replacement['replacement_mention'] = user_mention
 
             # Track ticket join
-            track_ticket_join(user_id)
+            track_ticket_join(user_id, interaction.guild.id)
 
             # Update the button label to show count
             for item in self.children:
@@ -3044,7 +3044,7 @@ class HelperView(ui.View):
             # Award points to all helpers
             helper_rewards = []
             for helper_id, helper_mention in self.helpers:
-                new_total = add_points(helper_id, total_points, self.selected_bosses)
+                new_total = add_points(helper_id, total_points, self.selected_bosses, interaction.guild.id)
                 helper_rewards.append(f"{helper_mention}: +{total_points} points (Total: {new_total})")
 
             # Mark ticket as completed
@@ -3232,7 +3232,7 @@ class UltraWeekliesModal(ui.Modal, title="UltraWeeklies Request"):
             helper_view = HelperView(requester_id=interaction.user.id, selected_bosses=self.selected_bosses)
 
             # Track ticket creation
-            track_ticket_created(interaction.user.id, "UltraWeeklies")
+            track_ticket_created(interaction.user.id, "UltraWeeklies", interaction.guild.id)
 
             # Send embed to the new channel with helper button
             await new_channel.send(embed=embed, view=helper_view)
@@ -3616,7 +3616,7 @@ class UltraDailiesModal(ui.Modal, title="UltraDailies 4-Man Request"):
             helper_view = DailiesHelperView(requester_id=interaction.user.id, selected_bosses=self.selected_bosses)
 
             # Track ticket creation
-            track_ticket_created(interaction.user.id, "UltraDailies4Man")
+            track_ticket_created(interaction.user.id, "UltraDailies4Man", interaction.guild.id)
 
             # Send embed to the new channel with helper button
             await new_channel.send(embed=embed, view=helper_view)
@@ -3702,7 +3702,7 @@ class DailiesHelperView(ui.View):
                 unfilled_replacement['replacement_mention'] = user_mention
 
             # Track ticket join
-            track_ticket_join(user_id)
+            track_ticket_join(user_id, interaction.guild.id)
 
             # Update the button label to show count
             for item in self.children:
@@ -3851,7 +3851,7 @@ class DailiesHelperView(ui.View):
             # Award points to all helpers
             helper_rewards = []
             for helper_id, helper_mention in self.helpers:
-                new_total = add_points(helper_id, total_points, self.selected_bosses)
+                new_total = add_points(helper_id, total_points, self.selected_bosses, interaction.guild.id)
                 helper_rewards.append(f"{helper_mention}: +{total_points} points (Total: {new_total})")
 
             # Mark ticket as completed
@@ -4144,7 +4144,7 @@ class Ultra7ManModal(ui.Modal, title="UltraDailies 7-Man Request"):
             helper_view = SevenManHelperView(requester_id=interaction.user.id, selected_bosses=self.selected_bosses)
 
             # Track ticket creation
-            track_ticket_created(interaction.user.id, "UltraDailies7Man")
+            track_ticket_created(interaction.user.id, "UltraDailies7Man", interaction.guild.id)
 
             # Send embed to the new channel with helper button
             await new_channel.send(embed=embed, view=helper_view)
@@ -4230,7 +4230,7 @@ class SevenManHelperView(ui.View):
                 unfilled_replacement['replacement_mention'] = user_mention
 
             # Track ticket join
-            track_ticket_join(user_id)
+            track_ticket_join(user_id, interaction.guild.id)
 
             # Update the button label to show count
             for item in self.children:
@@ -4379,7 +4379,7 @@ class SevenManHelperView(ui.View):
             # Award points to all helpers
             helper_rewards = []
             for helper_id, helper_mention in self.helpers:
-                new_total = add_points(helper_id, total_points, self.selected_bosses)
+                new_total = add_points(helper_id, total_points, self.selected_bosses, interaction.guild.id)
                 helper_rewards.append(f"{helper_mention}: +{total_points} points (Total: {new_total})")
 
             # Mark ticket as completed
@@ -4806,7 +4806,7 @@ class TempleShrineDailiesModal(ui.Modal, title="TempleShrine Dailies Request"):
             )
 
             # Track ticket creation
-            track_ticket_created(interaction.user.id, "TempleShrineDailies")
+            track_ticket_created(interaction.user.id, "TempleShrineDailies", interaction.guild.id)
 
             await new_channel.send(embed=embed, view=helper_view)
 
@@ -4930,7 +4930,7 @@ class TempleShrineSpammingModal(ui.Modal, title="TempleShrine Spamming Request")
             )
 
             # Track ticket creation
-            track_ticket_created(interaction.user.id, "TempleShrineSpamming")
+            track_ticket_created(interaction.user.id, "TempleShrineSpamming", interaction.guild.id)
 
             await new_channel.send(embed=embed, view=helper_view)
 
@@ -5004,7 +5004,7 @@ class TempleShrineHelperView(ui.View):
                 unfilled_replacement['replacement_id'] = user_id
                 unfilled_replacement['replacement_mention'] = user_mention
 
-            track_ticket_join(user_id)
+            track_ticket_join(user_id, interaction.guild.id)
 
             # Update the button label to show count
             for item in self.children:
@@ -5151,7 +5151,7 @@ class TempleShrineHelperView(ui.View):
 
                 helper_rewards = []
                 for helper_id, helper_mention in self.helpers:
-                    new_total = add_points(helper_id, total_points, boss_names)
+                    new_total = add_points(helper_id, total_points, boss_names, interaction.guild.id)
                     helper_rewards.append(f"{helper_mention}: +{total_points} points (Total: {new_total})")
 
                 self.ticket_completed = True
@@ -5286,7 +5286,7 @@ class RemoveHelperSpammingModal(ui.Modal, title="Remove Helper - Spamming"):
                         # Add boss names for tracking
                         boss_names.extend([boss_key] * kills)
 
-                add_points(helper_to_remove[0], total_points, boss_names)
+                add_points(helper_to_remove[0], total_points, boss_names, interaction.guild.id)
 
             # Remove helper from list
             self.helper_view.helpers.remove(helper_to_remove)
@@ -5397,7 +5397,7 @@ class RemoveHelperDailiesView(ui.View):
                     boss_names.append(boss_key)
 
                 if boss_names:
-                    add_points(helper_to_remove[0], points, boss_names)
+                    add_points(helper_to_remove[0], points, boss_names, interaction.guild.id)
 
             # Remove helper from list
             self.helper_view.helpers.remove(helper_to_remove)
@@ -5500,7 +5500,7 @@ class CompleteSpammingModal(ui.Modal, title="Complete Spamming Ticket"):
 
             helper_rewards = []
             for helper_id, helper_mention in self.helper_view.helpers:
-                new_total = add_points(helper_id, total_points, boss_names)
+                new_total = add_points(helper_id, total_points, boss_names, interaction.guild.id)
                 helper_rewards.append(f"{helper_mention}: +{total_points} points (Total: {new_total})")
 
             self.helper_view.ticket_completed = True
@@ -5712,7 +5712,7 @@ class ReplacementSidesView(ui.View):
             left_points = sum(BOSS_POINTS.get(side, 0) for side in sides_covered_by_left)
 
             if left_points > 0 or len(sides_covered_by_left) > 0:
-                new_total = add_points(left_id, left_points, list(sides_covered_by_left))
+                new_total = add_points(left_id, left_points, list(sides_covered_by_left), interaction.guild.id)
                 people_who_left[left_id] = {
                     'mention': left_mention,
                     'sides_covered': list(sides_covered_by_left),
@@ -5739,12 +5739,12 @@ class ReplacementSidesView(ui.View):
                 reward_info = replacement_rewards[helper_id]
                 points = reward_info['points']
                 sides = list(reward_info['sides'])
-                new_total = add_points(helper_id, points, sides)
+                new_total = add_points(helper_id, points, sides, interaction.guild.id)
                 helper_rewards.append(f"{helper_mention}: +{points} points (Total: {new_total})")
             else:
                 # This helper was NOT a replacement - award ALL sides
                 total_points = sum(BOSS_POINTS.get(side, 0) for side in all_sides)
-                new_total = add_points(helper_id, total_points, list(all_sides))
+                new_total = add_points(helper_id, total_points, list(all_sides), interaction.guild.id)
                 helper_rewards.append(f"{helper_mention}: +{total_points} points (Total: {new_total})")
 
         # Add people who left to helper rewards
@@ -6087,7 +6087,7 @@ class CompleteTotalKillCountModal(ui.Modal, title="Total Kill Counts"):
                     boss_names.extend([boss_key] * kills)
 
             if left_points > 0:
-                new_total = add_points(left_id, left_points, boss_names)
+                new_total = add_points(left_id, left_points, boss_names, interaction.guild.id)
                 people_who_left[left_id] = {
                     'mention': left_mention,
                     'kills': kills_by_left,
@@ -6127,7 +6127,7 @@ class CompleteTotalKillCountModal(ui.Modal, title="Total Kill Counts"):
                 reward_info = replacement_rewards[helper_id]
                 points = reward_info['points']
                 boss_names = reward_info['boss_names']
-                new_total = add_points(helper_id, points, boss_names)
+                new_total = add_points(helper_id, points, boss_names, interaction.guild.id)
                 helper_rewards.append(f"{helper_mention}: +{points} points (Total: {new_total})")
             else:
                 # This helper was NOT a replacement - award ALL kills
@@ -6141,7 +6141,7 @@ class CompleteTotalKillCountModal(ui.Modal, title="Total Kill Counts"):
                         total_points += side_points
                         all_boss_names.extend([boss_key] * kills)
 
-                new_total = add_points(helper_id, total_points, all_boss_names)
+                new_total = add_points(helper_id, total_points, all_boss_names, interaction.guild.id)
                 helper_rewards.append(f"{helper_mention}: +{total_points} points (Total: {new_total})")
 
         # Add people who left to helper rewards
@@ -6419,9 +6419,14 @@ async def wiki(interaction: discord.Interaction, query: str):
 
 @bot.tree.command(name="leaderboard")
 async def leaderboard_command(interaction: discord.Interaction):
-    """View the top helpers leaderboard"""
+    """View the top helpers leaderboard for this server"""
     try:
-        points_data = load_points()
+        all_points_data = load_points()
+
+        # Get this guild's data
+        guild_id_str = str(interaction.guild.id)
+        guild_data = all_points_data.get(guild_id_str, {})
+        points_data = guild_data.get("users", {})
 
         if not points_data:
             await interaction.response.send_message("No helper data yet! Be the first to help with tickets.", ephemeral=True)
@@ -6453,8 +6458,8 @@ async def leaderboard_command(interaction: discord.Interaction):
 
         # Build embed
         embed = discord.Embed(
-            title="Helper Leaderboard",
-            description="Top helpers ranked by total points",
+            title=f"Helper Leaderboard - {interaction.guild.name}",
+            description="Top helpers ranked by total points in this server",
             color=discord.Color.gold()
         )
 
@@ -6500,8 +6505,12 @@ async def leaderboard_command(interaction: discord.Interaction):
                 inline=False
             )
 
-        # Add Top Requesters section
-        requester_data = load_requester_stats()
+        # Add Top Requesters section (per-server)
+        all_requester_data = load_requester_stats()
+        guild_id_str = str(interaction.guild.id)
+        guild_requester_data = all_requester_data.get(guild_id_str, {})
+        requester_data = guild_requester_data.get("users", {})
+
         if requester_data:
             # Build list of (user_id, tickets_created)
             requester_list = []
@@ -6567,17 +6576,24 @@ async def resetleaderboard_command(interaction: discord.Interaction):
                     await button_interaction.response.send_message("Only the command user can confirm.", ephemeral=True)
                     return
 
-                # Reset helper points
-                save_points({})
+                # Reset helper points for THIS server only
+                all_points_data = load_points()
+                guild_id_str = str(interaction.guild.id)
+                if guild_id_str in all_points_data:
+                    all_points_data[guild_id_str] = {"users": {}}
+                    save_points(all_points_data)
 
-                # Reset requester stats
-                save_requester_stats({})
+                # Reset requester stats for THIS server only
+                all_requester_data = load_requester_stats()
+                if guild_id_str in all_requester_data:
+                    all_requester_data[guild_id_str] = {"users": {}}
+                    save_requester_stats(all_requester_data)
 
                 self.confirmed = True
                 self.stop()
 
                 await button_interaction.response.edit_message(
-                    content="Leaderboard has been reset! All helper points and requester stats have been cleared.",
+                    content=f"✅ Leaderboard has been reset for **{interaction.guild.name}**!\n\nAll helper points and requester stats for this server have been cleared.\n\n*(Other servers' data remains unchanged)*",
                     view=None
                 )
 
@@ -6595,7 +6611,7 @@ async def resetleaderboard_command(interaction: discord.Interaction):
 
         view = ConfirmResetView()
         await interaction.response.send_message(
-            "**Are you sure you want to reset the leaderboard?**\n\nThis will:\n- Clear all helper points\n- Clear all requester stats\n- This action cannot be undone!",
+            f"**Are you sure you want to reset the leaderboard for {interaction.guild.name}?**\n\nThis will:\n- Clear all helper points for this server\n- Clear all requester stats for this server\n- Other servers' data will NOT be affected\n\n⚠️ **This action cannot be undone!**",
             view=view,
             ephemeral=True
         )
@@ -6610,10 +6626,10 @@ async def resetleaderboard_command(interaction: discord.Interaction):
 
 @bot.tree.command(name="myscore")
 async def myscore_command(interaction: discord.Interaction):
-    """View your helper score and statistics"""
+    """View your helper score and statistics for this server"""
     try:
         user_id = interaction.user.id
-        stats = get_user_stats(user_id)
+        stats = get_user_stats(user_id, interaction.guild.id)
 
         total_points = stats["total_points"]
         bosses = stats["bosses"]
