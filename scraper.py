@@ -130,13 +130,14 @@ def get_character_info(char_id: str) -> Dict[str, Optional[str]]:
 
     result["guild"] = _first_text_by_label(soup, "Guild")
     if not result["guild"]:
+        # Only match guild in proper HTML structure, not in item filenames
         m = re.search(r"Guild[:\s]*<[^>]*>([^<]+)</", html, re.I)
         if m:
-            result["guild"] = m.group(1).strip()
-    if not result["guild"]:
-        m2 = re.search(r"Guild[:\s]*([A-Za-z0-9 _-]{2,50})", html, re.I)
-        if m2:
-            result["guild"] = m2.group(1).strip()
+            guild_text = m.group(1).strip()
+            # Filter out empty values and common placeholder text
+            if guild_text and guild_text not in ('---', 'None', 'N/A'):
+                result["guild"] = guild_text
+    # Removed overly-greedy fallback regex that was matching item filenames like "GuildBigCloak-8May14.swf"
 
     result["class"] = _first_text_by_label(soup, "Class")
 
@@ -153,7 +154,7 @@ def get_character_info(char_id: str) -> Dict[str, Optional[str]]:
     result["mana"] = _first_text_by_label(soup, "Mana") or _first_text_by_label(soup, "MP")
 
     for key in result:
-        if key != "raw_html":
+        if key not in ("raw_html", "ccid"):
             val = result[key]
             result[key] = val.strip() if val and val.strip() else None
 
@@ -182,8 +183,14 @@ async def get_character_info_async(char_id: str, session: aiohttp.ClientSession)
         "experience": None,
         "health": None,
         "mana": None,
+        "ccid": None,
         "raw_html": html
     }
+
+    # Extract ccid (Character ID) from the HTML
+    ccid = extract_ccid(html)
+    if ccid:
+        result["ccid"] = ccid
 
     for tagname in ("h1", "h2", "h3", "title"):
         t = soup.find(tagname)
@@ -198,13 +205,14 @@ async def get_character_info_async(char_id: str, session: aiohttp.ClientSession)
 
     result["guild"] = _first_text_by_label(soup, "Guild")
     if not result["guild"]:
+        # Only match guild in proper HTML structure, not in item filenames
         m = re.search(r"Guild[:\s]*<[^>]*>([^<]+)</", html, re.I)
         if m:
-            result["guild"] = m.group(1).strip()
-    if not result["guild"]:
-        m2 = re.search(r"Guild[:\s]*([A-Za-z0-9 _-]{2,50})", html, re.I)
-        if m2:
-            result["guild"] = m2.group(1).strip()
+            guild_text = m.group(1).strip()
+            # Filter out empty values and common placeholder text
+            if guild_text and guild_text not in ('---', 'None', 'N/A'):
+                result["guild"] = guild_text
+    # Removed overly-greedy fallback regex that was matching item filenames like "GuildBigCloak-8May14.swf"
 
     result["class"] = _first_text_by_label(soup, "Class")
 
@@ -219,7 +227,7 @@ async def get_character_info_async(char_id: str, session: aiohttp.ClientSession)
     result["mana"] = _first_text_by_label(soup, "Mana") or _first_text_by_label(soup, "MP")
 
     for key in result:
-        if key != "raw_html":
+        if key not in ("raw_html", "ccid"):
             val = result[key]
             result[key] = val.strip() if val and val.strip() else None
 
@@ -334,6 +342,7 @@ async def scrape_character(username: str) -> Optional[Dict[str, Any]]:
                 'character_image': None,
                 'badges_count': 0,
                 'inventory_count': 0,
+                'ccid': None,  # Character ID (unique identifier)
                 'flashvars': {}  # Store all FlashVars for downstream consumers
             }
             
@@ -458,6 +467,7 @@ async def scrape_character(username: str) -> Optional[Dict[str, Any]]:
             # Extract ccid using improved regex method
             ccid = extract_ccid(response.text)
             if ccid:
+                character_data['ccid'] = ccid
                 # Fetch badges count
                 try:
                     badges_response = await client.get(

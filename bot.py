@@ -56,6 +56,7 @@ REQUESTER_FILE = Path(__file__).parent / "requester_stats.json"
 # Verification system file paths
 VERIFIED_USERS_FILE = Path(__file__).parent / "verified_users.json"
 VERIFICATION_CONFIG_FILE = Path(__file__).parent / "verification_config.json"
+SERVER_CONFIG_FILE = Path(__file__).parent / "server_config.json"
 
 # Boss points mapping
 BOSS_POINTS = {
@@ -236,38 +237,52 @@ def save_verified_users(data):
     except Exception as e:
         logger.error(f"Error saving verified users: {e}")
 
-def add_verified_user(user_id, ign, guild):
-    """Add a verified user to storage"""
-    users = load_verified_users()
+def add_verified_user(user_id, ign, guild, ccid=None, guild_id=None):
+    """Add a verified user to storage (per-server)"""
+    data = load_verified_users()
     user_id_str = str(user_id)
+    guild_id_str = str(guild_id)
 
-    users[user_id_str] = {
+    # Ensure guild exists in data structure
+    if guild_id_str not in data:
+        data[guild_id_str] = {"users": {}}
+
+    # Add or update user
+    data[guild_id_str]["users"][user_id_str] = {
         "ign": ign,
         "guild": guild,
+        "ccid": ccid,  # Character ID (unique identifier)
         "verified_at": datetime.now(timezone.utc).isoformat(),
         "last_checked": datetime.now(timezone.utc).isoformat(),
         "failed_checks": 0
     }
 
-    save_verified_users(users)
-    logger.info(f"Added verified user: {user_id_str} (IGN: {ign}, Guild: {guild})")
+    save_verified_users(data)
+    logger.info(f"Added verified user: {user_id_str} in guild {guild_id_str} (IGN: {ign}, Guild: {guild}, CCID: {ccid})")
 
-def remove_verified_user(user_id):
-    """Remove a verified user from storage"""
-    users = load_verified_users()
+def remove_verified_user(user_id, guild_id):
+    """Remove a verified user from storage (per-server)"""
+    data = load_verified_users()
     user_id_str = str(user_id)
+    guild_id_str = str(guild_id)
 
-    if user_id_str in users:
-        del users[user_id_str]
-        save_verified_users(users)
-        logger.info(f"Removed verified user: {user_id_str}")
-        return True
+    if guild_id_str in data and "users" in data[guild_id_str]:
+        if user_id_str in data[guild_id_str]["users"]:
+            del data[guild_id_str]["users"][user_id_str]
+            save_verified_users(data)
+            logger.info(f"Removed verified user: {user_id_str} from guild {guild_id_str}")
+            return True
     return False
 
-def get_verified_user(user_id):
-    """Get verified user data"""
-    users = load_verified_users()
-    return users.get(str(user_id))
+def get_verified_user(user_id, guild_id):
+    """Get verified user data (per-server)"""
+    data = load_verified_users()
+    guild_id_str = str(guild_id)
+    user_id_str = str(user_id)
+
+    if guild_id_str in data and "users" in data[guild_id_str]:
+        return data[guild_id_str]["users"].get(user_id_str)
+    return None
 
 def load_verification_config():
     """Load verification config from JSON file"""
@@ -335,6 +350,97 @@ async def get_or_create_verification_logs_channel(guild: discord.Guild) -> Optio
         logger.error(f"Error creating verification-logs channel: {e}")
         return None
 
+# ==================== SERVER CONFIG HELPERS ====================
+
+def load_server_config():
+    """Load server configuration from JSON file"""
+    try:
+        if SERVER_CONFIG_FILE.exists():
+            with open(SERVER_CONFIG_FILE, 'r') as f:
+                return json.load(f)
+        return {}
+    except Exception as e:
+        logger.error(f"Error loading server config: {e}")
+        return {}
+
+def save_server_config(data):
+    """Save server configuration to JSON file"""
+    try:
+        with open(SERVER_CONFIG_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving server config: {e}")
+
+def get_verified_role_name(guild_id: int) -> str:
+    """Get the verified role name for a specific server"""
+    config = load_server_config()
+    guild_id_str = str(guild_id)
+    return config.get(guild_id_str, {}).get("verified_role_name", "Verified")
+
+def set_verified_role_name(guild_id: int, role_name: str):
+    """Set the verified role name for a specific server"""
+    config = load_server_config()
+    guild_id_str = str(guild_id)
+    if guild_id_str not in config:
+        config[guild_id_str] = {}
+    config[guild_id_str]["verified_role_name"] = role_name
+    save_server_config(config)
+    logger.info(f"Set verified role name for guild {guild_id} to: {role_name}")
+
+# ==================== END SERVER CONFIG HELPERS ====================
+
+# ==================== DATA MIGRATION ====================
+
+def migrate_verified_users_to_per_server():
+    """Migrate old flat structure to new per-server structure"""
+    try:
+        if not VERIFIED_USERS_FILE.exists():
+            return  # No data to migrate
+
+        with open(VERIFIED_USERS_FILE, 'r') as f:
+            data = json.load(f)
+
+        # Check if already migrated (has guild_id keys with "users" sub-key)
+        if data and any(isinstance(v, dict) and "users" in v for v in data.values()):
+            logger.info("Verified users data already migrated to per-server format")
+            return
+
+        # Old format detected - migrate it
+        if data:
+            logger.info(f"Migrating {len(data)} users from old format to per-server format")
+
+            # Get the first configured guild or use a default
+            # In production, you should configure which guild to migrate to
+            from os import getenv
+            guild_ids_env = getenv("GUILD_IDS")
+            if guild_ids_env:
+                default_guild = guild_ids_env.split(',')[0].strip()
+            else:
+                default_guild = getenv("GUILD_ID", "unknown")
+
+            # Create new structure
+            new_data = {
+                default_guild: {
+                    "users": data  # Move all old users to first guild
+                }
+            }
+
+            # Backup old data
+            backup_file = VERIFIED_USERS_FILE.parent / "verified_users_backup.json"
+            with open(backup_file, 'w') as f:
+                json.dump(data, f, indent=2)
+            logger.info(f"Backed up old data to: {backup_file}")
+
+            # Save migrated data
+            with open(VERIFIED_USERS_FILE, 'w') as f:
+                json.dump(new_data, f, indent=2)
+
+            logger.info(f"Migration complete: All users migrated to guild {default_guild}")
+    except Exception as e:
+        logger.error(f"Error during migration: {e}")
+
+# ==================== END DATA MIGRATION ====================
+
 # ==================== END VERIFICATION SYSTEM HELPERS ====================
 
 async def run_verification_check(guild: discord.Guild) -> dict:
@@ -349,11 +455,20 @@ async def run_verification_check(guild: discord.Guild) -> dict:
         "removed": 0
     }
 
-    verified_users = load_verified_users()
-    verified_role = discord.utils.get(guild.roles, name="Verified")
+    # Load per-server data
+    all_data = load_verified_users()
+    guild_id_str = str(guild.id)
+
+    # Get this guild's users
+    guild_data = all_data.get(guild_id_str, {})
+    verified_users = guild_data.get("users", {})
+
+    # Get configured role name for this guild
+    role_name = get_verified_role_name(guild.id)
+    verified_role = discord.utils.get(guild.roles, name=role_name)
 
     if not verified_role:
-        logger.warning("Verified role not found - skipping verification check")
+        logger.warning(f"Verified role '{role_name}' not found in guild {guild.name} - skipping verification check")
         return results
 
     logs_channel = await get_or_create_verification_logs_channel(guild)
@@ -391,6 +506,9 @@ async def run_verification_check(guild: discord.Guild) -> dict:
                 failed_checks += 1
                 user_data["failed_checks"] = failed_checks
                 user_data["last_checked"] = datetime.now(timezone.utc).isoformat()
+                # Save updated user data
+                all_data[guild_id_str]["users"][user_id_str] = user_data
+                save_verified_users(all_data)
                 results["errors"] += 1
 
                 if failed_checks == 1:
@@ -463,16 +581,28 @@ async def run_verification_check(guild: discord.Guild) -> dict:
             current_guild = char_info.get("guild")
             if current_guild:
                 current_guild = current_guild.strip().lower()
+            current_ccid = char_info.get("ccid")
 
             # Reset failed checks on successful fetch
             user_data["failed_checks"] = 0
             user_data["last_checked"] = datetime.now(timezone.utc).isoformat()
 
-            # Check if IGN or Guild changed
+            # Store ccid if we don't have it yet (graceful migration)
+            stored_ccid = user_data.get("ccid")
+            if current_ccid and not stored_ccid:
+                user_data["ccid"] = current_ccid
+                stored_ccid = current_ccid
+
+            # Save updated user data
+            all_data[guild_id_str]["users"][user_id_str] = user_data
+            save_verified_users(all_data)
+
+            # Check if IGN, Guild, or CCID changed
             ign_matches = current_ign == stored_ign
             guild_matches = (current_guild == stored_guild) if stored_guild else True
+            ccid_matches = (current_ccid == stored_ccid) if (current_ccid and stored_ccid) else True
 
-            if not ign_matches or not guild_matches:
+            if not ign_matches or not guild_matches or not ccid_matches:
                 # Mismatch found - remove role immediately
                 results["mismatches"] += 1
                 results["removed"] += 1
@@ -482,6 +612,8 @@ async def run_verification_check(guild: discord.Guild) -> dict:
                     mismatch_details.append(f"IGN changed: `{user_data.get('ign')}` → `{char_info.get('name')}`")
                 if not guild_matches:
                     mismatch_details.append(f"Guild changed: `{user_data.get('guild')}` → `{char_info.get('guild')}`")
+                if not ccid_matches:
+                    mismatch_details.append(f"Character ID changed: `{stored_ccid}` → `{current_ccid}` (Account ownership may have changed)")
 
                 try:
                     await member.remove_roles(verified_role)
@@ -514,7 +646,7 @@ async def run_verification_check(guild: discord.Guild) -> dict:
 
     # Remove users from storage
     for user_id_str in users_to_remove:
-        remove_verified_user(user_id_str)
+        remove_verified_user(user_id_str, guild.id)
 
     # Update config
     config = load_verification_config()
@@ -522,9 +654,6 @@ async def run_verification_check(guild: discord.Guild) -> dict:
     config["total_checks_run"] = config.get("total_checks_run", 0) + 1
     config["users_removed_total"] = config.get("users_removed_total", 0) + results["removed"]
     save_verification_config(config)
-
-    # Save updated user data
-    save_verified_users(verified_users)
 
     return results
 
@@ -660,12 +789,14 @@ http_session = None
 
 
 class FinishVerificationView(ui.View):
-    def __init__(self, channel: discord.TextChannel, user: discord.Member, ign: str, guild: str = "", has_mismatch: bool = False):
+    def __init__(self, channel: discord.TextChannel, user: discord.Member, ign: str, guild: str = "", ccid: int = None, has_mismatch: bool = False, guild_id: int = None):
         super().__init__()
         self.channel = channel
         self.user = user
         self.ign = ign
         self.guild = guild
+        self.ccid = ccid
+        self.guild_id = guild_id
 
         # Always add reject button for admin discretion
         self.add_item(RejectButton(channel, user, ign))
@@ -677,13 +808,15 @@ class FinishVerificationView(ui.View):
                 await interaction.response.send_message("❌ Only administrators can complete verification.", ephemeral=True)
                 return
 
-            # Check if "Verified" role exists
-            verified_role = discord.utils.get(interaction.guild.roles, name="Verified")
+            # Check if configured verified role exists
+            role_name = get_verified_role_name(interaction.guild.id)
+            verified_role = discord.utils.get(interaction.guild.roles, name=role_name)
             if not verified_role:
                 await interaction.response.send_message(
-                    "⚠️ **'Verified' role not found!**\n\n"
-                    "Please create a 'Verified' role in the server for the verification system to work properly.\n"
-                    "I cannot complete this verification without it.",
+                    f"⚠️ **'{role_name}' role not found!**\n\n"
+                    f"Please create a '{role_name}' role in the server for the verification system to work properly.\n"
+                    f"I cannot complete this verification without it.\n\n"
+                    f"You can change the configured role name using `/setverifiedrole`.",
                     ephemeral=True
                 )
                 return
@@ -716,8 +849,9 @@ class FinishVerificationView(ui.View):
                 logger.error(f"Failed to assign Verified role: {role_error}")
 
             if nickname_changed or role_assigned:
-                # Save user to verified_users.json
-                add_verified_user(self.user.id, self.ign, self.guild if self.guild else None)
+                # Save user to verified_users.json with the correct guild_id
+                guild_id = self.guild_id if self.guild_id else interaction.guild.id
+                add_verified_user(self.user.id, self.ign, self.guild if self.guild else None, self.ccid, guild_id)
 
                 success_msg = f"✅ Verification complete!\n"
                 if nickname_changed:
@@ -727,6 +861,25 @@ class FinishVerificationView(ui.View):
                 success_msg += f"• User data saved for daily verification checks"
 
                 await interaction.response.send_message(success_msg, ephemeral=True)
+
+                # Send log to verification-logs channel
+                try:
+                    logs_channel = await get_or_create_verification_logs_channel(interaction.guild)
+                    if logs_channel:
+                        log_embed = discord.Embed(
+                            title="✅ Verification Approved",
+                            color=discord.Color.green(),
+                            timestamp=datetime.now(timezone.utc)
+                        )
+                        log_embed.add_field(name="Discord Username", value=self.user.name, inline=False)
+                        log_embed.add_field(name="Discord ID", value=str(self.user.id), inline=False)
+                        log_embed.add_field(name="AQW IGN", value=self.ign, inline=False)
+                        log_embed.add_field(name="AQW Guild", value=self.guild if self.guild else "(None)", inline=False)
+                        log_embed.add_field(name="AQW ID", value=str(self.ccid) if self.ccid else "(Not available)", inline=False)
+                        log_embed.set_footer(text=f"Approved by {interaction.user.name}")
+                        await logs_channel.send(embed=log_embed)
+                except Exception as log_error:
+                    logger.error(f"Failed to send verification log: {log_error}")
 
                 try:
                     await self.user.send(
@@ -822,20 +975,28 @@ class VerificationModal(ui.Modal, title="Character Verification"):
             embed.add_field(name="Character IGN (used as ID)", value=char_id, inline=False)
             embed.add_field(name="IGN Check", value=f"{'✅ MATCH' if name_match else '❌ MISMATCH'}\nYou entered: `{user_ign}`\nPage shows: `{page_name}`", inline=False)
             embed.add_field(name="Guild Check", value=f"{'✅ MATCH' if guild_match else '❌ MISMATCH'}\nYou entered: `{user_guild if user_guild else '(empty)'}`\nPage shows: `{page_guild if page_guild else '(none)'}`", inline=False)
-            
+
+            # Add Character ID if available
+            char_ccid = info.get("ccid") if info else None
+            if char_ccid:
+                embed.add_field(name="Character ID (CCID)", value=f"`{char_ccid}`", inline=False)
+
             if name_match and guild_match:
                 embed.add_field(name="Status", value="✅ **Verification Successful!**", inline=False)
             else:
                 embed.add_field(name="Status", value="⚠️ **Verification Pending** - Mismatches detected. Admin review required.", inline=False)
-            
+
             embed.add_field(name="User", value=f"{interaction.user.mention} ({interaction.user.name})", inline=False)
 
             # Check if this is a re-verification
-            existing_data = get_verified_user(interaction.user.id)
+            existing_data = get_verified_user(interaction.user.id, interaction.guild.id)
             if existing_data:
+                reverif_msg = f"User was previously verified with:\nIGN: `{existing_data.get('ign')}`\nGuild: `{existing_data.get('guild') or '(none)'}`"
+                if existing_data.get('ccid'):
+                    reverif_msg += f"\nCCID: `{existing_data.get('ccid')}`"
                 embed.add_field(
                     name="ℹ️ Re-verification",
-                    value=f"User was previously verified with:\nIGN: `{existing_data.get('ign')}`\nGuild: `{existing_data.get('guild') or '(none)'}`",
+                    value=reverif_msg,
                     inline=False
                 )
 
@@ -868,7 +1029,9 @@ class VerificationModal(ui.Modal, title="Character Verification"):
                         overwrites=admin_overwrites,
                         topic=f"Verification record for {interaction.user.name} (IGN: {user_ign})"
                     )
-                    finish_view = FinishVerificationView(channel, interaction.user, user_ign, user_guild, has_mismatch)
+                    # Extract ccid from character info
+                    user_ccid = info.get("ccid") if info else None
+                    finish_view = FinishVerificationView(channel, interaction.user, user_ign, user_guild, user_ccid, has_mismatch, guild_id=interaction.guild.id)
                     await channel.send(embed=embed, view=finish_view)
 
                     # Send charpage link outside the embed
@@ -1442,6 +1605,9 @@ async def on_ready():
             import traceback
             traceback.print_exc()
 
+        # Migrate verified users data to per-server structure if needed
+        migrate_verified_users_to_per_server()
+
         # Start the daily verification check task
         if not daily_verification_check.is_running():
             daily_verification_check.start()
@@ -1470,17 +1636,52 @@ async def deployverification(interaction: discord.Interaction, channel: discord.
     try:
         await channel.send(embed=embed, view=view)
 
-        # Check if "Verified" role exists and warn admin if not
-        verified_role = discord.utils.get(interaction.guild.roles, name="Verified")
+        # Create verification-logs channel if it doesn't exist
+        logs_channel = await get_or_create_verification_logs_channel(interaction.guild)
+
+        # Check if configured verified role exists and warn admin if not
+        role_name = get_verified_role_name(interaction.guild.id)
+        verified_role = discord.utils.get(interaction.guild.roles, name=role_name)
+
+        response_msg = f"✅ Verification embed deployed to {channel.mention}"
+
+        if logs_channel:
+            response_msg += f"\n✅ Verification logs will be sent to {logs_channel.mention}"
+
         if not verified_role:
+            response_msg += f"\n\n⚠️ **Warning:** '{role_name}' role not found in this server.\nPlease create a '{role_name}' role for the verification system to work properly.\nYou can change the configured role name using `/setverifiedrole`."
+
+        await interaction.response.send_message(response_msg, ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Error: {str(e)}", ephemeral=True)
+
+
+@bot.tree.command(name="setverifiedrole")
+@app_commands.guild_only()
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(role_name="The name of the role to use for verified users")
+async def setverifiedrole(interaction: discord.Interaction, role_name: str):
+    """Set the verified role name for this server (Admin only)"""
+    try:
+        # Set the role name in config
+        set_verified_role_name(interaction.guild.id, role_name)
+
+        # Check if the role exists and provide appropriate feedback
+        role = discord.utils.get(interaction.guild.roles, name=role_name)
+        if not role:
             await interaction.response.send_message(
-                f"✅ Verification embed deployed to {channel.mention}\n\n"
-                f"⚠️ **Warning:** 'Verified' role not found in this server.\n"
-                f"Please create a 'Verified' role for the verification system to work properly.",
+                f"⚠️ **Configuration saved!**\n\n"
+                f"Verified role name set to: **{role_name}**\n\n"
+                f"**Warning:** Role '{role_name}' not found in this server.\n"
+                f"Please create the role for the verification system to work properly.",
                 ephemeral=True
             )
         else:
-            await interaction.response.send_message(f"✅ Verification embed deployed to {channel.mention}", ephemeral=True)
+            await interaction.response.send_message(
+                f"✅ Verified role name set to: **{role_name}**\n\n"
+                f"All verification operations in this server will now use this role.",
+                ephemeral=True
+            )
     except Exception as e:
         await interaction.response.send_message(f"❌ Error: {str(e)}", ephemeral=True)
 
