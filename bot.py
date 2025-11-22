@@ -3191,8 +3191,9 @@ class UltraWeekliesModal(ui.Modal, title="UltraWeeklies Request"):
             for boss in self.selected_bosses:
                 join_commands.append(f"/join {boss}-{user_room}")
 
-            # Create a private channel name based on username
-            channel_name = f"ultra-{interaction.user.name}-{user_room}".lower()
+            # Create a private channel name based on nickname or username
+            display_name = interaction.user.display_name or interaction.user.name
+            channel_name = f"ultra-{display_name}-{user_room}".lower()
             channel_name = re.sub(r'[^a-z0-9-]', '', channel_name)
 
             # Get the guild
@@ -3575,8 +3576,9 @@ class UltraDailiesModal(ui.Modal, title="UltraDailies 4-Man Request"):
             for boss in self.selected_bosses:
                 join_commands.append(f"/join {boss}-{user_room}")
 
-            # Create a private channel name based on username
-            channel_name = f"daily-{interaction.user.name}-{user_room}".lower()
+            # Create a private channel name based on nickname or username
+            display_name = interaction.user.display_name or interaction.user.name
+            channel_name = f"daily-{display_name}-{user_room}".lower()
             channel_name = re.sub(r'[^a-z0-9-]', '', channel_name)
 
             # Get the guild
@@ -4103,8 +4105,9 @@ class Ultra7ManModal(ui.Modal, title="UltraDailies 7-Man Request"):
             for boss in self.selected_bosses:
                 join_commands.append(f"/join {boss}-{user_room}")
 
-            # Create a private channel name based on username
-            channel_name = f"7man-{interaction.user.name}-{user_room}".lower()
+            # Create a private channel name based on nickname or username
+            display_name = interaction.user.display_name or interaction.user.name
+            channel_name = f"7man-{display_name}-{user_room}".lower()
             channel_name = re.sub(r'[^a-z0-9-]', '', channel_name)
 
             # Get the guild
@@ -4757,7 +4760,9 @@ class TempleShrineDailiesModal(ui.Modal, title="TempleShrine Dailies Request"):
             else:
                 boss_key = [f"TempleShrine-{side.replace(' Side', '')}" for side in self.selected_sides]
 
-            channel_name = f"temple-{interaction.user.name}-{user_room}".lower()
+            # Create a private channel name based on nickname or username
+            display_name = interaction.user.display_name or interaction.user.name
+            channel_name = f"temple-{display_name}-{user_room}".lower()
             channel_name = re.sub(r'[^a-z0-9-]', '', channel_name)
 
             guild = interaction.guild
@@ -4882,7 +4887,9 @@ class TempleShrineSpammingModal(ui.Modal, title="TempleShrine Spamming Request")
                 await interaction.response.send_message("Kill count must be a number!", ephemeral=True)
                 return
 
-            channel_name = f"temple-spam-{interaction.user.name}-{user_room}".lower()
+            # Create a private channel name based on nickname or username
+            display_name = interaction.user.display_name or interaction.user.name
+            channel_name = f"temple-spam-{display_name}-{user_room}".lower()
             channel_name = re.sub(r'[^a-z0-9-]', '', channel_name)
 
             guild = interaction.guild
